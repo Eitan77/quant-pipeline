@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .config import ScanConfig
+from .holdout import assert_pre_holdout_frame
 from .registry import TargetSpec
 
 ET = "America/New_York"
@@ -41,18 +42,20 @@ def load_canonical_bars(config: ScanConfig) -> pd.DataFrame:
                  session_date,ingested_at,source_ingestion_id
           from {config.source_table}
           where feed=? and adjustment=? and bar_complete
-            and cast(session_date as date)>=cast(? as date) and cast(session_date as date)<=cast(? as date)
+            and cast(session_date as date)>=cast(? as date) and cast(session_date as date)<cast(? as date)
             {symbol_clause}
           order by symbol,bar_start_ts
-        """,[config.feed,config.adjustment,config.start,config.discovery_end,*config.universe]).fetchdf()
+        """,[config.feed,config.adjustment,config.start,config.sealed_holdout_start,*config.universe]).fetchdf()
         membership=(con.execute(f"""
           select cast(date as date) session_date,symbol,is_member,source_ingestion_id,ingested_at
           from {config.membership_table}
-          where cast(date as date)>=cast(? as date) and cast(date as date)<=cast(? as date)
-        """,[config.start,config.discovery_end]).fetchdf() if config.membership_table in tables else pd.DataFrame())
+          where cast(date as date)>=cast(? as date) and cast(date as date)<cast(? as date)
+        """,[config.start,config.sealed_holdout_start]).fetchdf() if config.membership_table in tables else pd.DataFrame())
     finally:
         con.close()
     if bars.empty: raise ValueError("No canonical bars matched the configuration")
+    assert_pre_holdout_frame(bars,config.sealed_holdout_start,"raw bars")
+    if not membership.empty:assert_pre_holdout_frame(membership.rename(columns={"date":"session_date"}),config.sealed_holdout_start,"universe membership")
     for column in ["bar_start_ts","bar_end_ts","available_at_ts"]: bars[column]=pd.to_datetime(bars[column],utc=True)
     bars["_ingested_at"]=pd.to_datetime(bars.pop("ingested_at"),utc=True,errors="coerce")
     bars=bars.sort_values(["symbol","bar_start_ts","_ingested_at"]).drop_duplicates(["symbol","bar_start_ts"],keep="last")
@@ -117,6 +120,8 @@ def _attach_adjusted_prices(bars: pd.DataFrame,config: ScanConfig) -> pd.DataFra
         actions=pd.DataFrame(columns=["symbol","ex_date","split_ratio"])
     else:
         actions=pd.read_parquet(path)
+        if "ex_date" in actions and pd.to_datetime(actions.ex_date,errors="coerce").ge(pd.Timestamp(config.sealed_holdout_start)).any():
+            raise ValueError("Corporate-action ledger reaches sealed holdout")
     out=bars.copy()
     for column in ["open","high","low","close","vwap"]: out[f"{column}_raw"]=pd.to_numeric(out[column],errors="coerce")
     out["split_factor"]=1.0
@@ -158,6 +163,7 @@ def filter_decision_rows(frame: pd.DataFrame,config: ScanConfig) -> pd.DataFrame
 
 def add_targets(frame: pd.DataFrame,targets: list[TargetSpec],benchmark_symbol: str="QQQ",config:ScanConfig|None=None) -> pd.DataFrame:
     """Locate the first genuinely actionable entry bar and explicit exits."""
+    cfg=config or ScanConfig(); assert_pre_holdout_frame(frame,cfg.sealed_holdout_start,"target input")
     out=frame.sort_values(["symbol","session_date","bar_start_ts"],kind="stable").reset_index(drop=True).copy()
     if "open_raw" not in out:out["open_raw"]=out.open
     if "close_raw" not in out:out["close_raw"]=out.close
@@ -197,7 +203,7 @@ def add_targets(frame: pd.DataFrame,targets: list[TargetSpec],benchmark_symbol: 
         adjusted[target.name]=(out[raw]-out.decision_ts.map(benchmark)).astype(np.float32)
     beta_specs=[t for t in targets if t.classification=="beta_residual"]
     if beta_specs:
-        cfg=config or ScanConfig(); close_column="close_total_return_adjusted" if "close_total_return_adjusted" in out else "close_adjusted" if "close_adjusted" in out else "close_raw"
+        close_column="close_total_return_adjusted" if "close_total_return_adjusted" in out else "close_adjusted" if "close_adjusted" in out else "close_raw"
         daily=out.groupby(["symbol","session_date"],sort=False)[close_column].last().unstack("symbol"); returns=daily.pct_change(); market=returns.get(benchmark_symbol)
         beta_lookup={}
         if market is not None:
@@ -211,10 +217,12 @@ def add_targets(frame: pd.DataFrame,targets: list[TargetSpec],benchmark_symbol: 
             raw=target.name.removesuffix("_beta_residual"); benchmark=out.loc[benchmark_mask,["decision_ts",raw]].drop_duplicates("decision_ts").set_index("decision_ts")[raw]
             adjusted[target.name]=(out[raw]-beta_values*out.decision_ts.map(benchmark)).astype(np.float32)
     if adjusted:out=pd.concat([out,pd.DataFrame(adjusted,index=out.index)],axis=1)
+    assert_pre_holdout_frame(out,cfg.sealed_holdout_start,"target output")
     return out
 
 
 def validate_point_in_time(frame: pd.DataFrame,targets: list[TargetSpec],sealed_holdout_start: str|None=None) -> dict[str,int|float]:
+    if sealed_holdout_start:assert_pre_holdout_frame(frame,sealed_holdout_start,"point-in-time validation")
     required={"symbol","session_date","decision_ts","bar_start_ts","bar_end_ts","available_at_ts","entry_ts"}
     missing=required-set(frame.columns)
     if missing: raise ValueError(f"Feature-table identifiers missing: {sorted(missing)}")
@@ -241,12 +249,20 @@ def validate_point_in_time(frame: pd.DataFrame,targets: list[TargetSpec],sealed_
     universe=int((frame.symbol_role.eq("tradable")&frame.is_member.ne(True)).sum()) if "is_member" in frame else 0
     grid=int((~frame.bar_grid_valid.fillna(False)).sum()) if "bar_grid_valid" in frame else 0
     benchmark_alignment=0
+    benchmark_missing_rows=int((frame.symbol_role.eq("benchmark")&~frame.benchmark_valid.fillna(False)).sum()) if {"symbol_role","benchmark_valid"}.issubset(frame) else 0
+    benchmark_invalid_sessions=int(frame.loc[frame.symbol_role.eq("benchmark")&~frame.benchmark_valid.fillna(False),"session_date"].nunique()) if {"symbol_role","benchmark_valid"}.issubset(frame) else 0
     benchmark_present=("symbol_role" in frame and frame.symbol_role.eq("benchmark").any()) or frame.symbol.eq("QQQ").any()
     for target in [t for t in targets if t.classification=="benchmark_adjusted"] if benchmark_present else []:
         raw=target.name.removesuffix("_benchmark_adjusted")
         if raw in frame and target.name in frame:
             eligible=frame.symbol_role.eq("tradable") if "symbol_role" in frame else pd.Series(True,index=frame.index)
             benchmark_alignment+=int((eligible&frame[raw].notna()&frame[target.name].isna()).sum())
+    beta_history_excluded=0
+    for target in [t for t in targets if t.classification=="beta_residual"]:
+        raw=target.name.removesuffix("_beta_residual")
+        if raw in frame and target.name in frame:
+            eligible=frame.symbol_role.eq("tradable") if "symbol_role" in frame else pd.Series(True,index=frame.index)
+            beta_history_excluded+=int((eligible&frame[raw].notna()&frame[target.name].isna()).sum())
     failures=duplicate+source_duplicate+availability+entry_before+exit_before+cross_session+horizon_mismatch+missing_entry_price+missing_exit_price+holdout+universe+grid+benchmark_alignment
     if failures: raise ValueError(f"PIT validation failed: duplicates={duplicate}, source_duplicates={source_duplicate}, availability={availability}, entry={entry_before}, exit={exit_before}, cross_session={cross_session}, horizon={horizon_mismatch}, entry_price={missing_entry_price}, exit_price={missing_exit_price}, holdout={holdout}, universe={universe}, grid={grid}, benchmark_alignment={benchmark_alignment}")
     sessions=frame.drop_duplicates(["symbol","session_date"])
@@ -254,7 +270,7 @@ def validate_point_in_time(frame: pd.DataFrame,targets: list[TargetSpec],sealed_
     incomplete=sessions.loc[sessions.missing_bars_in_session.gt(0)] if "missing_bars_in_session" in sessions else sessions.iloc[0:0]
     excluded=sessions.loc[~sessions.session_grid_eligible.fillna(False)] if "session_grid_eligible" in sessions else sessions.iloc[0:0]
     excessive=sorted(excluded.symbol.unique().tolist()) if len(excluded) else []
-    return {"rows":len(frame),"duplicate_identifiers":duplicate,"duplicate_source_bars":source_duplicate,"availability_violations":availability,"target_timing_violations":entry_before+exit_before,"entry_before_decision_violations":entry_before,"exit_before_entry_violations":exit_before,"target_cross_session_violations":cross_session,"horizon_mismatch_violations":horizon_mismatch,"missing_entry_price_rows":missing_entry_price,"missing_exit_price_rows":missing_exit_price,"holdout_rows":holdout,"universe_violations":universe,"grid_violations":grid,"missing_benchmark_rows":benchmark_alignment,"expected_bars":expected,"missing_bars":missing_bars,"missing_bar_rate":missing_bars/expected if expected else 0.0,"incomplete_sessions":len(incomplete),"sessions_excluded":len(excluded),"symbols_with_excessive_missingness":excessive,"target_columns":len(targets)}
+    return {"rows":len(frame),"duplicate_identifiers":duplicate,"duplicate_source_bars":source_duplicate,"availability_violations":availability,"target_timing_violations":entry_before+exit_before,"entry_before_decision_violations":entry_before,"exit_before_entry_violations":exit_before,"target_cross_session_violations":cross_session,"horizon_mismatch_violations":horizon_mismatch,"missing_entry_price_rows":missing_entry_price,"missing_exit_price_rows":missing_exit_price,"holdout_rows":holdout,"universe_violations":universe,"grid_violations":grid,"missing_benchmark_rows":benchmark_alignment,"benchmark_source_rows_invalid":benchmark_missing_rows,"benchmark_sessions_invalid":benchmark_invalid_sessions,"beta_residual_rows_excluded_insufficient_history":beta_history_excluded,"expected_bars":expected,"missing_bars":missing_bars,"missing_bar_rate":missing_bars/expected if expected else 0.0,"incomplete_sessions":len(incomplete),"sessions_excluded":len(excluded),"symbols_with_excessive_missingness":excessive,"target_columns":len(targets)}
 
 
 def source_provenance(config: ScanConfig) -> dict:
@@ -262,8 +278,8 @@ def source_provenance(config: ScanConfig) -> dict:
     try:
         schema=con.execute(f"describe {config.source_table}").fetchall()
         stats=con.execute(f"""select count(*),min(bar_start_ts),max(bar_end_ts),count(distinct symbol),max(ingested_at)
-          from {config.source_table} where feed=? and adjustment=? and cast(session_date as date) between cast(? as date) and cast(? as date)""",[config.feed,config.adjustment,config.start,config.discovery_end]).fetchone()
-        partitions=con.execute(f"""select year(cast(session_date as date)),count(*),min(bar_start_ts),max(bar_end_ts),max(ingested_at) from {config.source_table} where feed=? and adjustment=? and cast(session_date as date) between cast(? as date) and cast(? as date) group by 1 order by 1""",[config.feed,config.adjustment,config.start,config.discovery_end]).fetchall()
-        membership=con.execute(f"""select count(*),min(date),max(date),count(distinct symbol),sum(case when is_member then 1 else 0 end) from {config.membership_table} where cast(date as date) between cast(? as date) and cast(? as date)""",[config.start,config.discovery_end]).fetchone()
+          from {config.source_table} where feed=? and adjustment=? and cast(session_date as date)>=cast(? as date) and cast(session_date as date)<cast(? as date)""",[config.feed,config.adjustment,config.start,config.sealed_holdout_start]).fetchone()
+        partitions=con.execute(f"""select year(cast(session_date as date)),count(*),min(bar_start_ts),max(bar_end_ts),max(ingested_at) from {config.source_table} where feed=? and adjustment=? and cast(session_date as date)>=cast(? as date) and cast(session_date as date)<cast(? as date) group by 1 order by 1""",[config.feed,config.adjustment,config.start,config.sealed_holdout_start]).fetchall()
+        membership=con.execute(f"""select count(*),min(date),max(date),count(distinct symbol),sum(case when is_member then 1 else 0 end) from {config.membership_table} where cast(date as date)>=cast(? as date) and cast(date as date)<cast(? as date)""",[config.start,config.sealed_holdout_start]).fetchone()
     finally: con.close()
     return {"catalog_path":config.catalog_path,"source_table":config.source_table,"row_count":stats[0],"minimum_timestamp":str(stats[1]),"maximum_timestamp":str(stats[2]),"symbol_count":stats[3],"latest_ingestion_timestamp":str(stats[4]),"feed":config.feed,"adjustment":config.adjustment,"bar_frequency":"5m","holdout_boundary":config.sealed_holdout_start,"source_schema_hash":hashlib.sha256(json.dumps(schema,default=str).encode()).hexdigest(),"source_partition_fingerprint":hashlib.sha256(json.dumps(partitions,default=str).encode()).hexdigest(),"membership_fingerprint":hashlib.sha256(json.dumps(membership,default=str).encode()).hexdigest(),"duplicate_resolution_policy":"latest ingested row per symbol and bar_start_ts","corporate_action_source":config.corporate_actions_path,"universe_source":config.membership_table,"sector_source":config.sector_map_path,"exchange_calendar":config.exchange_calendar}

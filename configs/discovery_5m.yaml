@@ -3,11 +3,14 @@ source_table: derived_bars_5m
 feed: sip
 adjustment: raw
 start: "2019-06-21"
-selection_end: "2023-12-31"
-confirmation_start: "2024-01-01"
 discovery_end: "2026-04-30"
 sealed_holdout_start: "2026-05-01"
 allow_holdout_access: false
+use_separate_confirmation_period: false
+run_historical_walk_forward_diagnostics: true
+run_recent_period_diagnostics: true
+run_recency_weighted_diagnostics: true
+recency_half_lives_months: [6, 12, 24]
 membership_table: qqq_pit_membership_daily
 membership_source_quality: effective_date_reconstruction
 require_membership: true
@@ -27,7 +30,7 @@ min_bin_observations: 30
 outlier_policy: none
 output_root: D:/AlgoResearch/Quant Pipeline/runs
 benchmark_symbol: QQQ
-experiment_id: phase1_3_final_corrected_through_20260430
+experiment_id: phase1_final_discovery_through_20260430
 use_cuda: true
 cuda_device: cuda:0
 feature_workers: 16
@@ -50,4 +53,4 @@ beta_min_observations: 40
 max_candidates_per_feature_family: 20
 max_candidates_per_cluster: 3
 max_candidates_per_target_family: 30
-cache_schema_version: phase1_3
+cache_schema_version: phase1_final

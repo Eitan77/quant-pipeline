@@ -130,5 +130,5 @@ def test_fingerprint_changes_with_formula_source(monkeypatch,tmp_path):
 
 def test_holdout_rows_are_rejected_when_seal_is_enforced():
     bars=bars_for_days(days=("2026-05-01",),bars=3); bars["symbol_role"]="tradable"; bars["bar_grid_valid"]=True; bars["is_member"]=True
-    out=add_targets(bars,target_registry([5],[5]))
-    with pytest.raises(ValueError,match="holdout=3"):validate_point_in_time(out,target_registry([5],[5]),"2026-05-01")
+    with pytest.raises(ValueError,match="Sealed holdout row"):
+        add_targets(bars,target_registry([5],[5]))

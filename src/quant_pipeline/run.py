@@ -19,9 +19,11 @@ from .report import write_reports
 from .table import add_targets, filter_decision_rows, load_canonical_bars, source_provenance, validate_point_in_time
 from .fingerprint import enforce_fingerprint,run_fingerprint
 from .cache import ROW_KEYS,assert_key_alignment,validate_cache,write_cache_metadata
+from .holdout import assert_pre_holdout_frame
 
 
 def execute(config: ScanConfig) -> Path:
+    config.validate()
     run_id=config.experiment_id
     root=Path(config.output_root)/run_id; root.mkdir(parents=True,exist_ok=True)
     sector=bool(config.sector_map_path); requested=feature_registry(config.lookbacks,sector,config.opening_windows_minutes); targets=target_registry(config.target_horizons_minutes,config.primary_target_horizons_minutes)
@@ -30,8 +32,8 @@ def execute(config: ScanConfig) -> Path:
     import pandas as pd
     fingerprint_sha=fingerprint["sha256"]; bars_cache=root/"canonical_bars.parquet"; bars=None
     if not bars_cache.exists():
-        bars=load_canonical_bars(config); bars.to_parquet(bars_cache,index=False); write_cache_metadata(bars_cache,bars,fingerprint_sha)
-    else:validate_cache(bars_cache,fingerprint_sha)
+        bars=load_canonical_bars(config); bars.to_parquet(bars_cache,index=False); write_cache_metadata(bars_cache,bars,fingerprint_sha,config.sealed_holdout_start)
+    else:validate_cache(bars_cache,fingerprint_sha,config.sealed_holdout_start)
     checkpoint=root/"screen_checkpoint.csv"; journal=root/"screen_journal.csv"; results=pd.DataFrame(); built_names=set(); validation_records=[]
     block_root=root/"blocks"; feature_root=block_root/"features"; target_root=block_root/"targets"; feature_root.mkdir(parents=True,exist_ok=True); target_root.mkdir(parents=True,exist_ok=True)
     eligible=[s for s in requested if s.status=="requested"]
@@ -53,9 +55,9 @@ def execute(config: ScanConfig) -> Path:
             target_frame=add_targets(bars,target_batch,config.benchmark_symbol,config); record=validate_point_in_time(target_frame,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record)
             identifiers=[*ROW_KEYS,"bar_end_ts","available_at_ts","symbol_role","pit_member","scan_eligible","session_grid_eligible","analysis_eligible","benchmark_valid"]
             target_columns=[*identifiers,"entry_ts","entry_open_raw","beta_at_decision",*[t.name for t in target_batch],*[f"exit_ts__{t.name}" for t in target_batch if t.classification=="raw"],*[f"exit_close_raw__{t.name}" for t in target_batch if t.classification=="raw"],*[f"actual_horizon_minutes__{t.name}" for t in target_batch if t.classification=="raw"]]
-            target_columns=[c for c in target_columns if c in target_frame]; cached=target_frame[target_columns].copy(); cached.to_parquet(path,index=False); write_cache_metadata(path,cached,fingerprint_sha); del target_frame,cached; gc.collect()
+            target_columns=[c for c in target_columns if c in target_frame]; cached=target_frame[target_columns].copy(); cached.to_parquet(path,index=False); write_cache_metadata(path,cached,fingerprint_sha,config.sealed_holdout_start); del target_frame,cached; gc.collect()
         else:
-            validate_cache(path,fingerprint_sha); cached=pd.read_parquet(path); record=validate_point_in_time(cached,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record); del cached
+            validate_cache(path,fingerprint_sha,config.sealed_holdout_start); cached=pd.read_parquet(path); record=validate_point_in_time(cached,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record); del cached
         (root/"progress.json").write_text(json.dumps({"stage":"target_cache","completed":target_index+1,"total":len(target_batches),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
     del bars; bars=None; gc.collect()
     # Symbol-local blocks are built by 16 independent processes. Features that
@@ -65,7 +67,7 @@ def execute(config: ScanConfig) -> Path:
         digest=hashlib.sha1("\n".join(s.name for s in chunk).encode()).hexdigest()[:10]
         path=feature_root/f"feature_{feature_index:03d}_{digest}.parquet"; feature_paths.append(path)
         if path.exists():
-            validate_cache(path,fingerprint_sha)
+            validate_cache(path,fingerprint_sha,config.sealed_holdout_start)
             import pyarrow.parquet as pq
             columns=set(pq.ParquetFile(path).schema.names); built=[s for s in chunk if s.name in columns]
         elif all(is_symbol_local(spec) for spec in chunk):
@@ -78,7 +80,7 @@ def execute(config: ScanConfig) -> Path:
             feature_frame,built=build_features(bars,config,chunk)
             feature_frame.to_parquet(path,index=False); del feature_frame; gc.collect()
         if not path.with_suffix(path.suffix+".meta.json").exists():
-            metadata_frame=pd.read_parquet(path); write_cache_metadata(path,metadata_frame,fingerprint_sha); del metadata_frame
+            metadata_frame=pd.read_parquet(path); write_cache_metadata(path,metadata_frame,fingerprint_sha,config.sealed_holdout_start); del metadata_frame
         built_by_chunk.append(built); built_names.update(s.name for s in built)
         (root/"progress.json").write_text(json.dumps({"stage":"feature_cache","completed":feature_index+1,"total":len(chunks),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
     del bars; gc.collect()
@@ -101,7 +103,9 @@ def execute(config: ScanConfig) -> Path:
                 target_batch=target_batches[target_index]; target_frame=future.result()
                 future=prefetch.submit(pd.read_parquet,target_paths[pending[position+1]]) if position+1<len(pending) else None
                 assert_key_alignment(feature_frame,target_frame)
-                selection_mask=pd.to_datetime(feature_frame.session_date).le(pd.Timestamp(config.selection_end))&feature_frame.analysis_eligible.fillna(False)
+                screen_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
+                if not screen_end:raise ValueError("A discovery screen end is required")
+                selection_mask=pd.to_datetime(feature_frame.session_date).le(pd.Timestamp(screen_end))&feature_frame.analysis_eligible.fillna(False)
                 if config.decision_times_et:
                     local=pd.to_datetime(feature_frame.decision_ts,utc=True).dt.tz_convert("America/New_York"); selection_mask&=local.dt.strftime("%H:%M").isin(config.decision_times_et)
                 screen_features=feature_frame.loc[selection_mask].reset_index(drop=True); screen_targets=target_frame.loc[selection_mask].reset_index(drop=True)
@@ -130,7 +134,12 @@ def execute(config: ScanConfig) -> Path:
     primary["family_fdr"]=primary.groupby(["feature_family","target_family"],dropna=False).raw_p.transform(benjamini_hochberg)
     primary["candidate_cluster"]=primary.redundancy_group.fillna(primary.feature)+"__"+primary.target.map(_target_horizon_family)
     primary["cluster_fdr"]=primary.groupby("candidate_cluster",dropna=False).raw_p.transform(benjamini_hochberg)
-    results=results.merge(primary[["feature","target","primary_global_fdr"]],on=["feature","target"],how="left"); results.to_csv(root/"master_results.csv",index=False)
+    exploratory=results.loc[results.target_tier.eq("exploratory")].copy()
+    exploratory["exploratory_family_fdr"]=exploratory.groupby(["feature_family","target_family"],dropna=False).raw_p.transform(benjamini_hochberg)
+    results=results.merge(primary[["feature","target","primary_global_fdr"]],on=["feature","target"],how="left")
+    if not exploratory.empty:results=results.merge(exploratory[["feature","target","exploratory_family_fdr"]],on=["feature","target"],how="left")
+    else:results["exploratory_family_fdr"]=np.nan
+    results["primary_test_count"]=int(primary.raw_p.notna().sum()); results["exploratory_test_count"]=int(exploratory.raw_p.notna().sum()); results.to_csv(root/"master_results.csv",index=False)
     feature_path_by_name={spec.name:feature_paths[index] for index,chunk in enumerate(chunks) for spec in chunk}
     queue=_cluster_candidates(primary,feature_path_by_name,config,limit=250)
     top_specs=[s for s in requested if s.name in set(queue.feature)]
@@ -139,21 +148,22 @@ def execute(config: ScanConfig) -> Path:
     from concurrent.futures import FIRST_COMPLETED,ProcessPoolExecutor,ThreadPoolExecutor,wait
     from .exact_parallel import exact_pair
     from .hybrid_exact import gpu_dense_pair
-    cpu_rows={}; gpu_rows={}; hints={(row.feature,row.target):float(row.spearman) for row in queue.itertuples()}; screen_fdr={(row.feature,row.target):float(row.primary_global_fdr) for row in queue.itertuples()}
+    cpu_rows={}; diagnostic_rows={}; gpu_rows={}; hints={(row.feature,row.target):float(row.spearman) for row in queue.itertuples()}; screen_fdr={(row.feature,row.target):float(row.primary_global_fdr) for row in queue.itertuples()}
     cpu_done=gpu_done=0
     with ProcessPoolExecutor(max_workers=config.exact_workers) as cpu_pool, ThreadPoolExecutor(max_workers=1) as gpu_pool:
         futures={}
         for row in queue.itertuples():
             key=(row.feature,row.target); feature_path=feature_path_by_name[row.feature]; target_path=target_path_by_name[row.target]
             futures[cpu_pool.submit(exact_pair,feature_path,target_path,spec_by_name[row.feature],row.target,config,hints[key])]=("cpu",key)
-            futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,config.selection_end)]=("gpu",key)
+            exact_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
+            futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,exact_end)]=("gpu",key)
         pending=set(futures)
         while pending:
             finished,pending=wait(pending,return_when=FIRST_COMPLETED)
             for future in finished:
                 kind,key=futures[future]
                 if kind=="cpu":
-                    row,table=future.result(); cpu_rows[key]=row; qtabs[key]=pd.DataFrame(table); cpu_done+=1
+                    row,table,diagnostics=future.result(); cpu_rows[key]=row; diagnostic_rows[key]=diagnostics; qtabs[key]=pd.DataFrame(table); cpu_done+=1
                 else:
                     dense,table=future.result(); gpu_rows[key]=dense; gpu_done+=1
             status={"stage":"exact_diagnostics_hybrid","cpu_completed":cpu_done,"gpu_completed":gpu_done,"total":len(queue),"cpu_workers":config.exact_workers,"gpu_workers":1,"updated_at":datetime.now(timezone.utc).isoformat()}
@@ -170,39 +180,73 @@ def execute(config: ScanConfig) -> Path:
     if not detailed.empty:
         detailed["exact_selected_bh_fdr_p"]=detailed.groupby(["feature_family","target_family"],dropna=False).raw_p.transform(benjamini_hochberg)
         detailed["bh_fdr_p"]=detailed["screen_bh_fdr_p_global"]
-        detailed=_classify_detailed_candidates(detailed)
-        detailed["effect_size_score"]=detailed.top_bottom_spread.abs().rank(pct=True); detailed["global_fdr_score"]=(1-detailed.bh_fdr_p.fillna(1)).clip(0,1); detailed["quantile_shape_score"]=detailed.monotonicity.abs().fillna(0); detailed["session_stability_score"]=detailed.year_consistency.fillna(0); detailed["symbol_breadth_score"]=detailed.symbol_breadth.fillna(0); detailed["outlier_robustness_score"]=(detailed.outlier_worst_signed_spread.fillna(0)>0).astype(float); detailed["confirmation_score"]=detailed.confirmation_status.eq("fully_confirmed_phase1").astype(float); detailed["walk_forward_score"]=detailed.walk_forward_positive_fold_pct.fillna(0); detailed["redundancy_penalty"]=detailed.groupby("candidate_cluster").cumcount()*.05; detailed["complexity_penalty"]=detailed.feature.str.count("_")*.005
-        detailed["anomaly_score"]=.2*detailed.effect_size_score+.2*detailed.global_fdr_score+.1*detailed.quantile_shape_score+.1*detailed.session_stability_score+.1*detailed.symbol_breadth_score+.1*detailed.outlier_robustness_score+.1*detailed.confirmation_score+.1*detailed.walk_forward_score-detailed.redundancy_penalty-detailed.complexity_penalty
+        detailed=apply_confirmation_fdr(detailed,config)
+        detailed=_classify_detailed_candidates(detailed,config)
+        detailed["effect_size_score"]=detailed.top_bottom_spread.abs().rank(pct=True); detailed["global_fdr_score"]=(1-detailed.bh_fdr_p.fillna(1)).clip(0,1); detailed["quantile_shape_score"]=detailed.monotonicity.abs().fillna(0); detailed["session_stability_score"]=detailed.year_consistency.fillna(0); detailed["symbol_breadth_score"]=detailed.symbol_breadth.fillna(0); detailed["outlier_robustness_score"]=(detailed.outlier_worst_signed_spread.fillna(0)>0).astype(float); detailed["historical_stability_score"]=detailed.get("historical_subperiod_positive_fold_pct",pd.Series(0,index=detailed.index)).fillna(0); detailed["recent_relevance_score"]=detailed.get("recent_12m_effect",pd.Series(0,index=detailed.index)).gt(0).astype(float); detailed["redundancy_penalty"]=detailed.groupby("candidate_cluster").cumcount()*.05; detailed["complexity_penalty"]=detailed.feature.str.count("_")*.005
+        detailed["anomaly_score"]=.2*detailed.effect_size_score+.2*detailed.global_fdr_score+.1*detailed.quantile_shape_score+.1*detailed.session_stability_score+.1*detailed.symbol_breadth_score+.1*detailed.outlier_robustness_score+.1*detailed.historical_stability_score+.1*detailed.recent_relevance_score-detailed.redundancy_penalty-detailed.complexity_penalty
         detailed=detailed.sort_values("anomaly_score",ascending=False); detailed.to_csv(root/"detailed_candidates.csv",index=False)
-        cluster_report=detailed.groupby("candidate_cluster",dropna=False).agg(pairs=("feature","size"),best_primary_fdr=("bh_fdr_p","min"),best_effect=("top_bottom_spread",lambda s:float(s.loc[s.abs().idxmax()])),confirmed=("status",lambda s:int(s.eq("fully_confirmed_phase1").any()))).reset_index()
+        cluster_report=detailed.groupby("candidate_cluster",dropna=False).agg(pairs=("feature","size"),best_primary_fdr=("bh_fdr_p","min"),best_effect=("top_bottom_spread",lambda s:float(s.loc[s.abs().idxmax()])),robust_phase1=("status",lambda s:int(s.eq("robust_phase1_anomaly_candidate").any()))).reset_index()
         cluster_report.to_csv(root/"cluster_level_anomalies.csv",index=False)
+        diagnostic_root=root/"candidate_diagnostics"; diagnostic_root.mkdir(exist_ok=True)
+        for (feature,target),tables in diagnostic_rows.items():
+            stem=f"{feature}__{target}".replace("/","_")
+            for name,records in tables.items():
+                table=pd.DataFrame(records)
+                if not table.empty:
+                    assert_pre_holdout_frame(table,config.sealed_holdout_start,f"diagnostic output {name}")
+                    table.to_csv(diagnostic_root/f"{stem}__{name}.csv",index=False)
     _write_coverage_reports(root,results,requested,feature_paths,built_by_chunk)
-    write_reports(detailed if not detailed.empty else results.head(50), qtabs, root, None)
+    assert_pre_holdout_frame(pd.read_parquet(bars_cache,columns=["session_date","bar_start_ts","decision_ts"]),config.sealed_holdout_start,"report input")
+    write_reports(detailed if not detailed.empty else results.head(50), qtabs, root, None, config=config,run_metadata={"fingerprint":fingerprint_sha,"git_commit":_git_revision()})
     from .gpu import CorrelationBackend
     violation_fields=["entry_before_decision_violations","exit_before_entry_violations","target_cross_session_violations","horizon_mismatch_violations","missing_entry_price_rows","missing_exit_price_rows","missing_benchmark_rows","holdout_rows"]
     validation_summary={field:int(sum(record.get(field,0) for record in validation_records)) for field in violation_fields}; provenance=source_provenance(config)
-    manifest={"experiment_id":run_id,"cache_schema_version":config.cache_schema_version,"executed_at":datetime.now(timezone.utc).isoformat(),"git_commit":_git_revision(),"config":config.as_dict(),"configuration_hash":hashlib.sha256(json.dumps(config.as_dict(),sort_keys=True).encode()).hexdigest(),"fingerprint":fingerprint_sha,"source_provenance":provenance,"discovery_start":config.start,"discovery_end":config.selection_end,"confirmation_start":config.confirmation_start,"confirmation_end":config.discovery_end,"sealed_holdout_start":config.sealed_holdout_start,"holdout_access":config.allow_holdout_access,"requested_features":len(requested),"built_features":len(built_names),"skipped_features":skipped,"target_count_requested":len(targets),"target_count_built":len(targets),"target_batches_requested":len(target_batches),"target_batches_built":len(target_paths),"target_batches_validated":len(validation_records),"targets_validated":sum(len(batch) for batch in target_batches),"target_batch_validation":validation_records,"validation_violations":validation_summary,"broad_screen_pair_count":len(results),"pairs_passing_coverage":int(results.raw_p.notna().sum()),"global_fdr_significant_primary_pairs":int(primary.primary_global_fdr.lt(config.primary_fdr_threshold).sum()),"candidate_cluster_count":int(detailed.candidate_cluster.nunique()) if not detailed.empty else 0,"exact_candidate_count":len(detailed),"internally_confirmed_count":int(detailed.status.eq("fully_confirmed_phase1").sum()) if not detailed.empty else 0,"primary_targets":[t.name for t in targets if t.tier=="primary"],"multiple_testing":"Primary-target global, feature-family, candidate-cluster and exact-pair FDR are reported separately; exploratory horizons cannot promote candidates","statistical_error":"Date-clustered screen; exact pass adds two-way date/symbol clustering, session-block bootstrap, and HAC daily spread/IC inference","correlation_backend":CorrelationBackend(config.use_cuda,config.cuda_device).name}
+    manifest={"experiment_id":run_id,"cache_schema_version":config.cache_schema_version,"executed_at":datetime.now(timezone.utc).isoformat(),"git_commit":_git_revision(),"config":config.as_dict(),"configuration_hash":hashlib.sha256(json.dumps(config.as_dict(),sort_keys=True).encode()).hexdigest(),"fingerprint":fingerprint_sha,"source_provenance":provenance,"evidence_label":"full_pre_holdout_discovery","discovery_start":config.start,"discovery_end":config.discovery_end,"use_separate_confirmation_period":config.use_separate_confirmation_period,"confirmation_start":config.confirmation_start if config.use_separate_confirmation_period else None,"confirmation_end":config.discovery_end if config.use_separate_confirmation_period else None,"sealed_holdout_start":config.sealed_holdout_start,"holdout_access":config.allow_holdout_access,"requested_features":len(requested),"built_features":len(built_names),"skipped_features":skipped,"target_count_requested":len(targets),"target_count_built":len(targets),"target_batches_requested":len(target_batches),"target_batches_built":len(target_paths),"target_batches_validated":len(validation_records),"targets_validated":sum(len(batch) for batch in target_batches),"target_batch_validation":validation_records,"validation_violations":validation_summary,"broad_screen_pair_count":len(results),"pairs_passing_coverage":int(results.raw_p.notna().sum()),"primary_test_count":int(primary.raw_p.notna().sum()),"exploratory_test_count":int(exploratory.raw_p.notna().sum()),"global_fdr_significant_primary_pairs":int(primary.primary_global_fdr.lt(config.primary_fdr_threshold).sum()),"exploratory_significant_pairs":int(exploratory.exploratory_family_fdr.lt(config.primary_fdr_threshold).sum()) if not exploratory.empty else 0,"candidate_cluster_count":int(detailed.candidate_cluster.nunique()) if not detailed.empty else 0,"exact_candidate_count":len(detailed),"robust_phase1_candidate_count":int(detailed.status.eq("robust_phase1_anomaly_candidate").sum()) if not detailed.empty else 0,"requires_phase2_count":int(detailed.status.eq("requires_phase2_testing").sum()) if not detailed.empty else 0,"primary_targets":[t.name for t in targets if t.tier=="primary"],"multiple_testing":"Global BH across primary prespecified targets; feature-family and cluster FDR reported separately. Exploratory horizons and recency diagnostics cannot promote candidates.","statistical_error":"Date-clustered screen; exact pass adds two-way date/symbol clustering, session-block bootstrap, and HAC daily spread/IC inference","correlation_backend":CorrelationBackend(config.use_cuda,config.cuda_device).name}
+    manifest["known_limitations"]=["Point-in-time sector, industry, and market-cap diagnostics are unavailable unless a reviewed sector_map_path is configured.","Spread diagnostics use available liquidity proxies; quote-level execution costs remain Phase 2 work.","Historical annual folds are subperiod stability diagnostics, not independently selected out-of-sample confirmation."]
+    manifest["benchmark_source_rows_invalid"]=int(sum(record.get("benchmark_source_rows_invalid",0) for record in validation_records))
+    manifest["benchmark_sessions_invalid"]=int(sum(record.get("benchmark_sessions_invalid",0) for record in validation_records))
+    manifest["beta_residual_rows_excluded_insufficient_history"]=int(sum(record.get("beta_residual_rows_excluded_insufficient_history",0) for record in validation_records))
     (root/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
     (root/"progress.json").write_text(json.dumps({"stage":"complete","screened_pairs":len(results),"exact_candidates":len(detailed),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
     return root
 
 
-def _classify_detailed_candidates(detailed):
-    """Apply the global discovery gate before assigning robust labels."""
+def _classify_detailed_candidates(detailed,config:ScanConfig|None=None):
+    """Assign full-discovery evidence labels; recency alone never promotes."""
+    config=config or ScanConfig()
     result=detailed.copy()
     usable=~result.status.isin(["constant_feature","insufficient_data"])
-    exact=result.raw_p.lt(.05)
-    global_fdr=result.screen_bh_fdr_p_global.lt(.05)
-    stable=result.year_consistency.ge(.6)&result.symbol_breadth.ge(.6)
-    economic=result.get("top_bottom_spread",pd.Series(np.inf,index=result.index)).abs().ge(1/10000)
-    if "confirmation_status" in result:confirmed=result.confirmation_status.eq("fully_confirmed_phase1")
-    else:confirmed=pd.Series(False,index=result.index)
+    coverage=result.get("n",pd.Series(0,index=result.index)).ge(config.min_observations)&result.get("valid_sessions",pd.Series(0,index=result.index)).ge(config.min_sessions)&result.get("valid_symbols",pd.Series(0,index=result.index)).ge(config.min_symbols)
+    raw_p=result.get("raw_p",pd.Series(np.nan,index=result.index,dtype=float))
+    exact=result.get("two_way_cluster_p",raw_p).lt(.05)
+    global_fdr=result.get("screen_bh_fdr_p_global",pd.Series(np.nan,index=result.index,dtype=float)).lt(config.primary_fdr_threshold)
+    stable=result.get("year_consistency",pd.Series(np.nan,index=result.index,dtype=float)).ge(.6)&result.get("symbol_breadth",pd.Series(np.nan,index=result.index,dtype=float)).ge(.6)
+    economic=result.get("top_bottom_spread",pd.Series(np.inf,index=result.index)).abs().ge(config.minimum_effect_bps/10000)
+    shape=result.get("monotonicity",pd.Series(0,index=result.index)).abs().ge(.5)
+    outlier=result.get("outlier_worst_signed_spread",pd.Series(-np.inf,index=result.index)).gt(0)
+    breadth=~result.get("symbol_breadth_classification",pd.Series("insufficient_evidence",index=result.index)).isin(["highly_concentrated","single_symbol_dominated","insufficient_evidence"])
+    recent=result.get("recent_12m_effect",pd.Series(np.nan,index=result.index)).gt(0)
     result.loc[usable,"status"]="no_meaningful_relationship"
-    result.loc[usable&exact&~stable,"status"]="interesting_but_unstable"
-    result.loc[usable&exact&stable&~global_fdr,"status"]="interesting_not_global"
-    result.loc[usable&global_fdr&~(exact&stable),"status"]="statistically_interesting"
-    result.loc[usable&global_fdr&exact&stable&economic,"status"]="robust_anomaly_candidate"
-    result.loc[usable&global_fdr&exact&stable&economic&confirmed,"status"]="fully_confirmed_phase1"
+    result.loc[usable&exact&~global_fdr,"status"]="exploratory_relationship"
+    result.loc[usable&global_fdr,"status"]="statistically_significant_discovery"
+    result.loc[usable&global_fdr&exact&coverage&economic&stable,"status"]="stable_anomaly_candidate"
+    result.loc[usable&global_fdr&exact&coverage&economic&recent&~stable,"status"]="recently_relevant_anomaly_candidate"
+    robust=usable&global_fdr&exact&coverage&economic&stable&shape&outlier&breadth
+    result.loc[robust,"status"]="robust_phase1_anomaly_candidate"
+    result.loc[usable&global_fdr&exact&coverage&economic&~robust&result.get("phase2_recommendation",pd.Series("",index=result.index)).str.startswith("advance"),"status"]="requires_phase2_testing"
+    result["phase2_required"]=result.status.isin(["robust_phase1_anomaly_candidate","requires_phase2_testing"])
+    return result
+
+
+def apply_confirmation_fdr(detailed:pd.DataFrame,config:ScanConfig)->pd.DataFrame:
+    result=detailed.copy()
+    if config.use_separate_confirmation_period:
+        values=result.get("confirmation_p_value",pd.Series(np.nan,index=result.index,dtype=float))
+        result["confirmation_fdr"]=benjamini_hochberg(values)
+        result["nominally_confirmed"]=values.lt(config.confirmation_alpha)
+        result["confirmation_fdr_confirmed"]=result.confirmation_fdr.lt(config.confirmation_alpha)
+    else:
+        result["confirmation_fdr"]=np.nan; result["nominally_confirmed"]=False; result["confirmation_fdr_confirmed"]=False
     return result
 
 

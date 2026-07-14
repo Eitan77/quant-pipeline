@@ -3,10 +3,13 @@ source_table: derived_bars_5m
 feed: sip
 adjustment: raw
 start: "2024-02-01"
-selection_end: "2024-02-29"
-confirmation_start: "2024-03-01"
 discovery_end: "2024-02-29"
 sealed_holdout_start: "2026-05-01"
+allow_holdout_access: false
+use_separate_confirmation_period: false
+run_historical_walk_forward_diagnostics: true
+run_recent_period_diagnostics: true
+run_recency_weighted_diagnostics: true
 membership_table: qqq_pit_membership_daily
 require_membership: true
 corporate_actions_path: D:/AlgoResearch/Quant Pipeline/reference/corporate_actions_through_20260430.parquet
@@ -22,7 +25,7 @@ min_decision_timestamps: 100
 min_years: 1
 min_bin_observations: 20
 output_root: D:/AlgoResearch/Quant Pipeline/runs
-experiment_id: phase1_3_smoke_one_month_202402
+experiment_id: phase1_final_smoke_one_month_202402
 use_cuda: true
 feature_workers: 8
 exact_workers: 4
@@ -32,4 +35,4 @@ exact_bootstrap_samples: 100
 max_candidates_per_feature_family: 5
 max_candidates_per_cluster: 2
 max_candidates_per_target_family: 10
-cache_schema_version: phase1_3
+cache_schema_version: phase1_final

@@ -167,7 +167,8 @@ def build_features(
     requested={s.name:s for s in specs}; built=[]
     for name,spec in requested.items():
         if spec.status=="requested" and name in x: built.append(spec)
-    identifiers=["symbol","session_date","bar_start_ts","bar_end_ts","available_at_ts","decision_ts","scheduled_open","scheduled_close","open","high","low","close","vwap","open_raw","high_raw","low_raw","close_raw","vwap_raw","open_adjusted","high_adjusted","low_adjusted","close_adjusted","vwap_adjusted","split_factor","symbol_role","pit_member","scan_eligible","session_grid_eligible","analysis_eligible","benchmark_valid","shortened_session","bar_gap","gap_segment","membership_source_quality"]
+    identifiers=["symbol","session_date","bar_start_ts","bar_end_ts","available_at_ts","decision_ts","scheduled_open","scheduled_close","open","high","low","close","vwap","volume","open_raw","high_raw","low_raw","close_raw","vwap_raw","open_adjusted","high_adjusted","low_adjusted","close_adjusted","vwap_adjusted","split_factor","symbol_role","pit_member","scan_eligible","session_grid_eligible","analysis_eligible","benchmark_valid","shortened_session","bar_gap","gap_segment","membership_source_quality"]
+    identifiers += [column for column in ["close_total_return_adjusted","sector","industry","market_cap"] if column in x]
     keep=identifiers+[s.name for s in built]
     # Projection is the memory boundary: temporary dependencies and unrelated
     # features never enter target construction or statistical scanning.

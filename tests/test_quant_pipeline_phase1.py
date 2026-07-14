@@ -89,6 +89,10 @@ def test_robust_candidate_status_requires_global_fdr():
         "screen_bh_fdr_p_global":[.2,.01],
         "year_consistency":[1.,1.],
         "symbol_breadth":[.8,.8],
+        "n":[1000,1000],"valid_sessions":[200,200],"valid_symbols":[30,30],
+        "two_way_cluster_p":[1e-6,1e-6],"top_bottom_spread":[.001,.001],
+        "monotonicity":[1.,1.],"outlier_worst_signed_spread":[.0005,.0005],
+        "symbol_breadth_classification":["broad_across_symbols"]*2,
     })
     classified=_classify_detailed_candidates(frame)
-    assert classified.status.tolist()==["interesting_not_global","robust_anomaly_candidate"]
+    assert classified.status.tolist()==["exploratory_relationship","robust_phase1_anomaly_candidate"]

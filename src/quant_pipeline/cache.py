@@ -4,6 +4,8 @@ import hashlib,json
 from pathlib import Path
 import pandas as pd
 
+from .holdout import assert_pre_holdout_frame, assert_pre_holdout_parquet
+
 ROW_KEYS=["symbol","session_date","bar_start_ts","decision_ts"]
 
 
@@ -20,19 +22,23 @@ def schema_hash(frame:pd.DataFrame)->str:
     return hashlib.sha256(json.dumps([(c,str(t)) for c,t in frame.dtypes.items()]).encode()).hexdigest()
 
 
-def write_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str)->dict:
+def write_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str,sealed_holdout_start:str="2026-05-01")->dict:
+    assert_pre_holdout_frame(frame,sealed_holdout_start,f"cache write {path}")
+    assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache write {path}")
     persisted=pd.read_parquet(path)
     if persisted.duplicated(ROW_KEYS).any():raise ValueError(f"Duplicate cache keys: {path}")
     metadata={"fingerprint":fingerprint,"row_count":len(persisted),"first_key":[str(x) for x in persisted[ROW_KEYS].iloc[0]] if len(persisted) else None,"last_key":[str(x) for x in persisted[ROW_KEYS].iloc[-1]] if len(persisted) else None,"row_key_hash":row_key_hash(persisted),"column_schema_hash":schema_hash(persisted)}
     path.with_suffix(path.suffix+".meta.json").write_text(json.dumps(metadata,indent=2),encoding="utf-8"); return metadata
 
 
-def validate_cache(path:Path,fingerprint:str)->dict:
+def validate_cache(path:Path,fingerprint:str,sealed_holdout_start:str="2026-05-01")->dict:
+    assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache resume {path}")
     metadata_path=path.with_suffix(path.suffix+".meta.json")
     if not metadata_path.exists():raise CacheFingerprintMismatch(f"Cache metadata missing: {path}")
     saved=json.loads(metadata_path.read_text(encoding="utf-8"))
     if saved["fingerprint"]!=fingerprint:raise CacheFingerprintMismatch(f"Cache fingerprint mismatch: {path}")
     frame=pd.read_parquet(path); current={"row_count":len(frame),"row_key_hash":row_key_hash(frame),"column_schema_hash":schema_hash(frame)}
+    assert_pre_holdout_frame(frame,sealed_holdout_start,f"cache resume {path}")
     if any(saved[k]!=current[k] for k in current):raise CacheFingerprintMismatch(f"Cache integrity check failed: {path}")
     if frame.duplicated(ROW_KEYS).any() or not frame.sort_values(ROW_KEYS,kind="stable").index.equals(frame.index):raise CacheFingerprintMismatch(f"Cache keys are duplicate or unsorted: {path}")
     return saved

@@ -114,12 +114,13 @@ def test_beta_at_decision_uses_prior_sessions_only():
     assert np.isfinite(before) and before==pytest.approx(after)
 
 
-def test_only_post_selection_years_are_walk_forward_folds():
+def test_historical_subperiod_diagnostic_covers_recent_years_without_oos_claim():
     rows=[]
     for year in range(2021,2027):
         for i in range(120):rows.append({"session_date":pd.Timestamp(year=year,month=1,day=2),"x":i,"y":i/1000})
     result=_walk_forward(pd.DataFrame(rows),"x","y",1)
-    assert result["walk_forward_folds"]==3
+    assert result["historical_subperiod_folds"]==5
+    assert result["diagnostic_evidence_label"]=="historical_subperiod_stability"
 
 
 def test_redundant_candidates_are_capped_and_targets_are_tiered():

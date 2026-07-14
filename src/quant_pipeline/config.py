@@ -14,11 +14,16 @@ class ScanConfig:
     feed: str = "sip"
     adjustment: str = "raw"
     start: str = "2019-06-21"
-    selection_end: str = "2023-12-31"
-    confirmation_start: str = "2024-01-01"
+    selection_end: str | None = None
+    confirmation_start: str | None = None
     discovery_end: str = "2026-04-30"  # sealed holdout begins 2026-05-01
     sealed_holdout_start: str = "2026-05-01"
     allow_holdout_access: bool = False
+    use_separate_confirmation_period: bool = False
+    run_historical_walk_forward_diagnostics: bool = True
+    run_recent_period_diagnostics: bool = True
+    run_recency_weighted_diagnostics: bool = True
+    recency_half_lives_months: list[int] = field(default_factory=lambda: [6, 12, 24])
     universe: list[str] = field(default_factory=list)
     membership_table: str = "qqq_pit_membership_daily"
     membership_source_quality: str = "effective_date_reconstruction"
@@ -41,7 +46,7 @@ class ScanConfig:
     min_bin_observations: int = 30
     outlier_policy: str = "none"  # none|winsorize_1pct
     output_root: str = "D:/AlgoResearch/Quant Pipeline/runs"
-    experiment_id: str = "phase1_3_final_corrected_through_20260430"
+    experiment_id: str = "phase1_final_discovery_through_20260430"
     benchmark_symbol: str = "QQQ"
     sector_map_path: str | None = None
     use_cuda: bool = True
@@ -73,7 +78,7 @@ class ScanConfig:
     max_candidates_per_feature_family: int = 20
     max_candidates_per_cluster: int = 3
     max_candidates_per_target_family: int = 30
-    cache_schema_version: str = "phase1_3"
+    cache_schema_version: str = "phase1_final"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ScanConfig":
@@ -82,7 +87,16 @@ class ScanConfig:
         unknown = set(values) - allowed
         if unknown:
             raise ValueError(f"Unknown config keys: {sorted(unknown)}")
-        return cls(**values)
+        config=cls(**values); config.validate(); return config
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def validate(self) -> None:
+        import pandas as pd
+        if pd.Timestamp(self.discovery_end)>=pd.Timestamp(self.sealed_holdout_start):
+            raise ValueError("discovery_end must precede sealed_holdout_start")
+        if self.allow_holdout_access:raise ValueError("Phase 1 configuration may not allow holdout access")
+        if self.use_separate_confirmation_period and (not self.selection_end or not self.confirmation_start):
+            raise ValueError("Separate confirmation mode requires selection_end and confirmation_start")
+        if any(value<=0 for value in self.recency_half_lives_months):raise ValueError("Recency half-lives must be positive")

@@ -5,9 +5,16 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from .config import ScanConfig
+from .holdout import assert_pre_holdout_frame
 
-def write_reports(results: pd.DataFrame, quantiles: dict[tuple[str, str], pd.DataFrame], root: Path, frame: pd.DataFrame | None = None) -> None:
+
+def write_reports(results: pd.DataFrame, quantiles: dict[tuple[str, str], pd.DataFrame], root: Path, frame: pd.DataFrame | None = None, *, config:ScanConfig|None=None, run_metadata:dict|None=None) -> None:
     """Write diagnostics only; never strategy-level performance metrics."""
+    config=config or ScanConfig()
+    run_metadata=run_metadata or {}
+    assert_pre_holdout_frame(results,config.sealed_holdout_start,"report results")
+    if frame is not None:assert_pre_holdout_frame(frame,config.sealed_holdout_start,"report generation")
     candidates = results.head(50) if not results.empty else results
     candidates.to_html(root / "ranked_candidates.html", index=False, float_format=lambda x: f"{x:.6g}")
     charts = root / "charts"; charts.mkdir(exist_ok=True)
@@ -29,10 +36,11 @@ def write_reports(results: pd.DataFrame, quantiles: dict[tuple[str, str], pd.Dat
     feature_registry=pd.read_csv(root/"feature_registry.csv") if (root/"feature_registry.csv").exists() else pd.DataFrame()
     target_registry=pd.read_csv(root/"target_registry.csv") if (root/"target_registry.csv").exists() else pd.DataFrame()
     clusters=results.candidate_cluster.nunique() if "candidate_cluster" in results else 0
-    status=results.get("confirmation_status",pd.Series(dtype=str)); directional=int(status.isin(["directionally_replicated","economically_replicated","statistically_confirmed","fully_confirmed_phase1"]).sum()); economic=int(status.isin(["economically_replicated","statistically_confirmed","fully_confirmed_phase1"]).sum()); statistical=int(status.isin(["statistically_confirmed","fully_confirmed_phase1"]).sum()); confirmed=int(status.eq("fully_confirmed_phase1").sum())
-    text = ["# Phase 1.3 final corrected anomaly scan", "", "Statistical relationships only; no result is a trading strategy candidate until later execution work.", "", "## Run accounting", "", f"- Features requested: {len(feature_registry)}",f"- Features successfully built: {len(set(master.feature)) if not master.empty else 0}",f"- Targets requested: {len(target_registry)}",f"- Broad-screen feature-target pairs: {len(master)}",f"- Pairs passing coverage: {int(master.raw_p.notna().sum()) if not master.empty else 0}",f"- Globally FDR-significant pairs: {int(master.get('primary_global_fdr',pd.Series(dtype=float)).lt(.05).sum()) if not master.empty else 0}",f"- Redundancy clusters: {clusters}",f"- Exact diagnostic candidates: {len(results)}",f"- Directionally replicated candidates: {directional}",f"- Economically replicated candidates: {economic}",f"- Statistically confirmed candidates: {statistical}",f"- Fully confirmed Phase 1 anomalies: {confirmed}"]
+    status=results.get("status",pd.Series(dtype=str)); robust=int(status.eq("robust_phase1_anomaly_candidate").sum()); phase2=int(status.eq("requires_phase2_testing").sum())
+    primary_tests=int(master.get("primary_test_count",pd.Series([0])).max()) if not master.empty else 0; exploratory_tests=int(master.get("exploratory_test_count",pd.Series([0])).max()) if not master.empty else 0
+    text = ["# Final Phase 1 full-pre-holdout discovery", "", f"All permitted data through {config.discovery_end} was used for discovery and candidate ranking. Historical subperiod and recent-period results are robustness diagnostics. {config.sealed_holdout_start} onward was not accessed.", "", "Statistical anomaly evidence only; every promoted finding requires Phase 2 strategy and execution testing.", "", "## Data and methodology", "", f"- Evidence label: full_pre_holdout_discovery",f"- Discovery start: {config.start}",f"- Discovery end: {config.discovery_end}",f"- Sealed holdout start: {config.sealed_holdout_start}",f"- Holdout access: {str(config.allow_holdout_access).lower()}",f"- Source-data fingerprint: {run_metadata.get('fingerprint','unavailable')}",f"- Git commit: {run_metadata.get('git_commit','unavailable')}",f"- Cache schema: {config.cache_schema_version}",f"- Separate confirmation period: {str(config.use_separate_confirmation_period).lower()}",f"- Primary FDR family tests: {primary_tests}",f"- Exploratory FDR family tests: {exploratory_tests}","- Primary inference: global Benjamini-Hochberg FDR across prespecified primary targets.","- Exploratory inference: separate families; exploratory and recency-weighted evidence cannot independently promote a candidate.","", "## Results funnel", "", f"- Features requested: {len(feature_registry)}",f"- Features successfully built: {len(set(master.feature)) if not master.empty else 0}",f"- Targets requested: {len(target_registry)}",f"- Broad-screen feature-target pairs: {len(master)}",f"- Pairs passing coverage: {int(master.raw_p.notna().sum()) if not master.empty else 0}",f"- Primary globally significant pairs: {int(master.get('primary_global_fdr',pd.Series(dtype=float)).lt(config.primary_fdr_threshold).sum()) if not master.empty else 0}",f"- Exploratory significant pairs: {int(master.get('exploratory_family_fdr',pd.Series(dtype=float)).lt(config.primary_fdr_threshold).sum()) if not master.empty else 0}",f"- Redundancy clusters: {clusters}",f"- Exact diagnostic candidates: {len(results)}",f"- Robust Phase 1 anomaly candidates: {robust}",f"- Candidates requiring Phase 2 testing: {phase2}"]
     if not results.empty:
-        columns=[c for c in ["feature","target","pearson","top_bottom_spread","raw_p","bh_fdr_p","year_consistency","symbol_breadth","status"] if c in candidates]
+        columns=[c for c in ["feature","target","top_bottom_spread","bh_fdr_p","recent_5y_effect","recent_3y_effect","recent_2y_effect","recent_12m_effect","jan_apr_2026_effect","recent_classification","symbol_breadth_classification","phase2_recommendation","status"] if c in candidates]
         markdown=["| "+" | ".join(columns)+" |","| "+" | ".join(["---"]*len(columns))+" |"]
         markdown += ["| "+" | ".join(str(getattr(row,c)) for c in columns)+" |" for row in candidates[columns].itertuples(index=False)]
         text += ["", "## Top relationships", "", "\n".join(markdown)]
