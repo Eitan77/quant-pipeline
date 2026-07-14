@@ -9,6 +9,14 @@ data/
 *.png
 *.log
 
+# Curated aggregate research results may be explicitly versioned.
+!results/
+!results/**/*.csv
+!results/**/*.json
+!results/**/*.md
+!results/**/*.html
+!results/**/*.png
+
 # Secrets and machine-local configuration
 .env
 .env.*

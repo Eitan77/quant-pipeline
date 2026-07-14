@@ -1,0 +1,157 @@
+name,description,horizon_minutes,entry_definition,exit_definition,classification,overlaps
+fwd_return_5m,Raw return over next 5 minutes,5.0,first bar open at/after decision availability,close after 5 minutes,raw,True
+fwd_return_10m,Raw return over next 10 minutes,10.0,first bar open at/after decision availability,close after 10 minutes,raw,True
+fwd_return_15m,Raw return over next 15 minutes,15.0,first bar open at/after decision availability,close after 15 minutes,raw,True
+fwd_return_20m,Raw return over next 20 minutes,20.0,first bar open at/after decision availability,close after 20 minutes,raw,True
+fwd_return_25m,Raw return over next 25 minutes,25.0,first bar open at/after decision availability,close after 25 minutes,raw,True
+fwd_return_30m,Raw return over next 30 minutes,30.0,first bar open at/after decision availability,close after 30 minutes,raw,True
+fwd_return_35m,Raw return over next 35 minutes,35.0,first bar open at/after decision availability,close after 35 minutes,raw,True
+fwd_return_40m,Raw return over next 40 minutes,40.0,first bar open at/after decision availability,close after 40 minutes,raw,True
+fwd_return_45m,Raw return over next 45 minutes,45.0,first bar open at/after decision availability,close after 45 minutes,raw,True
+fwd_return_50m,Raw return over next 50 minutes,50.0,first bar open at/after decision availability,close after 50 minutes,raw,True
+fwd_return_55m,Raw return over next 55 minutes,55.0,first bar open at/after decision availability,close after 55 minutes,raw,True
+fwd_return_60m,Raw return over next 60 minutes,60.0,first bar open at/after decision availability,close after 60 minutes,raw,True
+fwd_return_65m,Raw return over next 65 minutes,65.0,first bar open at/after decision availability,close after 65 minutes,raw,True
+fwd_return_70m,Raw return over next 70 minutes,70.0,first bar open at/after decision availability,close after 70 minutes,raw,True
+fwd_return_75m,Raw return over next 75 minutes,75.0,first bar open at/after decision availability,close after 75 minutes,raw,True
+fwd_return_80m,Raw return over next 80 minutes,80.0,first bar open at/after decision availability,close after 80 minutes,raw,True
+fwd_return_85m,Raw return over next 85 minutes,85.0,first bar open at/after decision availability,close after 85 minutes,raw,True
+fwd_return_90m,Raw return over next 90 minutes,90.0,first bar open at/after decision availability,close after 90 minutes,raw,True
+fwd_return_95m,Raw return over next 95 minutes,95.0,first bar open at/after decision availability,close after 95 minutes,raw,True
+fwd_return_100m,Raw return over next 100 minutes,100.0,first bar open at/after decision availability,close after 100 minutes,raw,True
+fwd_return_105m,Raw return over next 105 minutes,105.0,first bar open at/after decision availability,close after 105 minutes,raw,True
+fwd_return_110m,Raw return over next 110 minutes,110.0,first bar open at/after decision availability,close after 110 minutes,raw,True
+fwd_return_115m,Raw return over next 115 minutes,115.0,first bar open at/after decision availability,close after 115 minutes,raw,True
+fwd_return_120m,Raw return over next 120 minutes,120.0,first bar open at/after decision availability,close after 120 minutes,raw,True
+fwd_return_125m,Raw return over next 125 minutes,125.0,first bar open at/after decision availability,close after 125 minutes,raw,True
+fwd_return_130m,Raw return over next 130 minutes,130.0,first bar open at/after decision availability,close after 130 minutes,raw,True
+fwd_return_135m,Raw return over next 135 minutes,135.0,first bar open at/after decision availability,close after 135 minutes,raw,True
+fwd_return_140m,Raw return over next 140 minutes,140.0,first bar open at/after decision availability,close after 140 minutes,raw,True
+fwd_return_145m,Raw return over next 145 minutes,145.0,first bar open at/after decision availability,close after 145 minutes,raw,True
+fwd_return_150m,Raw return over next 150 minutes,150.0,first bar open at/after decision availability,close after 150 minutes,raw,True
+fwd_return_155m,Raw return over next 155 minutes,155.0,first bar open at/after decision availability,close after 155 minutes,raw,True
+fwd_return_160m,Raw return over next 160 minutes,160.0,first bar open at/after decision availability,close after 160 minutes,raw,True
+fwd_return_165m,Raw return over next 165 minutes,165.0,first bar open at/after decision availability,close after 165 minutes,raw,True
+fwd_return_170m,Raw return over next 170 minutes,170.0,first bar open at/after decision availability,close after 170 minutes,raw,True
+fwd_return_175m,Raw return over next 175 minutes,175.0,first bar open at/after decision availability,close after 175 minutes,raw,True
+fwd_return_180m,Raw return over next 180 minutes,180.0,first bar open at/after decision availability,close after 180 minutes,raw,True
+fwd_return_185m,Raw return over next 185 minutes,185.0,first bar open at/after decision availability,close after 185 minutes,raw,True
+fwd_return_190m,Raw return over next 190 minutes,190.0,first bar open at/after decision availability,close after 190 minutes,raw,True
+fwd_return_195m,Raw return over next 195 minutes,195.0,first bar open at/after decision availability,close after 195 minutes,raw,True
+fwd_return_200m,Raw return over next 200 minutes,200.0,first bar open at/after decision availability,close after 200 minutes,raw,True
+fwd_return_205m,Raw return over next 205 minutes,205.0,first bar open at/after decision availability,close after 205 minutes,raw,True
+fwd_return_210m,Raw return over next 210 minutes,210.0,first bar open at/after decision availability,close after 210 minutes,raw,True
+fwd_return_215m,Raw return over next 215 minutes,215.0,first bar open at/after decision availability,close after 215 minutes,raw,True
+fwd_return_220m,Raw return over next 220 minutes,220.0,first bar open at/after decision availability,close after 220 minutes,raw,True
+fwd_return_225m,Raw return over next 225 minutes,225.0,first bar open at/after decision availability,close after 225 minutes,raw,True
+fwd_return_230m,Raw return over next 230 minutes,230.0,first bar open at/after decision availability,close after 230 minutes,raw,True
+fwd_return_235m,Raw return over next 235 minutes,235.0,first bar open at/after decision availability,close after 235 minutes,raw,True
+fwd_return_240m,Raw return over next 240 minutes,240.0,first bar open at/after decision availability,close after 240 minutes,raw,True
+fwd_return_245m,Raw return over next 245 minutes,245.0,first bar open at/after decision availability,close after 245 minutes,raw,True
+fwd_return_250m,Raw return over next 250 minutes,250.0,first bar open at/after decision availability,close after 250 minutes,raw,True
+fwd_return_255m,Raw return over next 255 minutes,255.0,first bar open at/after decision availability,close after 255 minutes,raw,True
+fwd_return_260m,Raw return over next 260 minutes,260.0,first bar open at/after decision availability,close after 260 minutes,raw,True
+fwd_return_265m,Raw return over next 265 minutes,265.0,first bar open at/after decision availability,close after 265 minutes,raw,True
+fwd_return_270m,Raw return over next 270 minutes,270.0,first bar open at/after decision availability,close after 270 minutes,raw,True
+fwd_return_275m,Raw return over next 275 minutes,275.0,first bar open at/after decision availability,close after 275 minutes,raw,True
+fwd_return_280m,Raw return over next 280 minutes,280.0,first bar open at/after decision availability,close after 280 minutes,raw,True
+fwd_return_285m,Raw return over next 285 minutes,285.0,first bar open at/after decision availability,close after 285 minutes,raw,True
+fwd_return_290m,Raw return over next 290 minutes,290.0,first bar open at/after decision availability,close after 290 minutes,raw,True
+fwd_return_295m,Raw return over next 295 minutes,295.0,first bar open at/after decision availability,close after 295 minutes,raw,True
+fwd_return_300m,Raw return over next 300 minutes,300.0,first bar open at/after decision availability,close after 300 minutes,raw,True
+fwd_return_305m,Raw return over next 305 minutes,305.0,first bar open at/after decision availability,close after 305 minutes,raw,True
+fwd_return_310m,Raw return over next 310 minutes,310.0,first bar open at/after decision availability,close after 310 minutes,raw,True
+fwd_return_315m,Raw return over next 315 minutes,315.0,first bar open at/after decision availability,close after 315 minutes,raw,True
+fwd_return_320m,Raw return over next 320 minutes,320.0,first bar open at/after decision availability,close after 320 minutes,raw,True
+fwd_return_325m,Raw return over next 325 minutes,325.0,first bar open at/after decision availability,close after 325 minutes,raw,True
+fwd_return_330m,Raw return over next 330 minutes,330.0,first bar open at/after decision availability,close after 330 minutes,raw,True
+fwd_return_335m,Raw return over next 335 minutes,335.0,first bar open at/after decision availability,close after 335 minutes,raw,True
+fwd_return_340m,Raw return over next 340 minutes,340.0,first bar open at/after decision availability,close after 340 minutes,raw,True
+fwd_return_345m,Raw return over next 345 minutes,345.0,first bar open at/after decision availability,close after 345 minutes,raw,True
+fwd_return_350m,Raw return over next 350 minutes,350.0,first bar open at/after decision availability,close after 350 minutes,raw,True
+fwd_return_355m,Raw return over next 355 minutes,355.0,first bar open at/after decision availability,close after 355 minutes,raw,True
+fwd_return_360m,Raw return over next 360 minutes,360.0,first bar open at/after decision availability,close after 360 minutes,raw,True
+fwd_return_365m,Raw return over next 365 minutes,365.0,first bar open at/after decision availability,close after 365 minutes,raw,True
+fwd_return_370m,Raw return over next 370 minutes,370.0,first bar open at/after decision availability,close after 370 minutes,raw,True
+fwd_return_375m,Raw return over next 375 minutes,375.0,first bar open at/after decision availability,close after 375 minutes,raw,True
+fwd_return_380m,Raw return over next 380 minutes,380.0,first bar open at/after decision availability,close after 380 minutes,raw,True
+fwd_return_385m,Raw return over next 385 minutes,385.0,first bar open at/after decision availability,close after 385 minutes,raw,True
+fwd_return_eod,Raw return from next actionable open to RTH close,,first bar open at/after decision availability,final complete RTH bar close,raw,True
+fwd_return_5m_benchmark_adjusted,Raw return over next 5 minutes minus benchmark return,5.0,first bar open at/after decision availability,close after 5 minutes,benchmark_adjusted,True
+fwd_return_10m_benchmark_adjusted,Raw return over next 10 minutes minus benchmark return,10.0,first bar open at/after decision availability,close after 10 minutes,benchmark_adjusted,True
+fwd_return_15m_benchmark_adjusted,Raw return over next 15 minutes minus benchmark return,15.0,first bar open at/after decision availability,close after 15 minutes,benchmark_adjusted,True
+fwd_return_20m_benchmark_adjusted,Raw return over next 20 minutes minus benchmark return,20.0,first bar open at/after decision availability,close after 20 minutes,benchmark_adjusted,True
+fwd_return_25m_benchmark_adjusted,Raw return over next 25 minutes minus benchmark return,25.0,first bar open at/after decision availability,close after 25 minutes,benchmark_adjusted,True
+fwd_return_30m_benchmark_adjusted,Raw return over next 30 minutes minus benchmark return,30.0,first bar open at/after decision availability,close after 30 minutes,benchmark_adjusted,True
+fwd_return_35m_benchmark_adjusted,Raw return over next 35 minutes minus benchmark return,35.0,first bar open at/after decision availability,close after 35 minutes,benchmark_adjusted,True
+fwd_return_40m_benchmark_adjusted,Raw return over next 40 minutes minus benchmark return,40.0,first bar open at/after decision availability,close after 40 minutes,benchmark_adjusted,True
+fwd_return_45m_benchmark_adjusted,Raw return over next 45 minutes minus benchmark return,45.0,first bar open at/after decision availability,close after 45 minutes,benchmark_adjusted,True
+fwd_return_50m_benchmark_adjusted,Raw return over next 50 minutes minus benchmark return,50.0,first bar open at/after decision availability,close after 50 minutes,benchmark_adjusted,True
+fwd_return_55m_benchmark_adjusted,Raw return over next 55 minutes minus benchmark return,55.0,first bar open at/after decision availability,close after 55 minutes,benchmark_adjusted,True
+fwd_return_60m_benchmark_adjusted,Raw return over next 60 minutes minus benchmark return,60.0,first bar open at/after decision availability,close after 60 minutes,benchmark_adjusted,True
+fwd_return_65m_benchmark_adjusted,Raw return over next 65 minutes minus benchmark return,65.0,first bar open at/after decision availability,close after 65 minutes,benchmark_adjusted,True
+fwd_return_70m_benchmark_adjusted,Raw return over next 70 minutes minus benchmark return,70.0,first bar open at/after decision availability,close after 70 minutes,benchmark_adjusted,True
+fwd_return_75m_benchmark_adjusted,Raw return over next 75 minutes minus benchmark return,75.0,first bar open at/after decision availability,close after 75 minutes,benchmark_adjusted,True
+fwd_return_80m_benchmark_adjusted,Raw return over next 80 minutes minus benchmark return,80.0,first bar open at/after decision availability,close after 80 minutes,benchmark_adjusted,True
+fwd_return_85m_benchmark_adjusted,Raw return over next 85 minutes minus benchmark return,85.0,first bar open at/after decision availability,close after 85 minutes,benchmark_adjusted,True
+fwd_return_90m_benchmark_adjusted,Raw return over next 90 minutes minus benchmark return,90.0,first bar open at/after decision availability,close after 90 minutes,benchmark_adjusted,True
+fwd_return_95m_benchmark_adjusted,Raw return over next 95 minutes minus benchmark return,95.0,first bar open at/after decision availability,close after 95 minutes,benchmark_adjusted,True
+fwd_return_100m_benchmark_adjusted,Raw return over next 100 minutes minus benchmark return,100.0,first bar open at/after decision availability,close after 100 minutes,benchmark_adjusted,True
+fwd_return_105m_benchmark_adjusted,Raw return over next 105 minutes minus benchmark return,105.0,first bar open at/after decision availability,close after 105 minutes,benchmark_adjusted,True
+fwd_return_110m_benchmark_adjusted,Raw return over next 110 minutes minus benchmark return,110.0,first bar open at/after decision availability,close after 110 minutes,benchmark_adjusted,True
+fwd_return_115m_benchmark_adjusted,Raw return over next 115 minutes minus benchmark return,115.0,first bar open at/after decision availability,close after 115 minutes,benchmark_adjusted,True
+fwd_return_120m_benchmark_adjusted,Raw return over next 120 minutes minus benchmark return,120.0,first bar open at/after decision availability,close after 120 minutes,benchmark_adjusted,True
+fwd_return_125m_benchmark_adjusted,Raw return over next 125 minutes minus benchmark return,125.0,first bar open at/after decision availability,close after 125 minutes,benchmark_adjusted,True
+fwd_return_130m_benchmark_adjusted,Raw return over next 130 minutes minus benchmark return,130.0,first bar open at/after decision availability,close after 130 minutes,benchmark_adjusted,True
+fwd_return_135m_benchmark_adjusted,Raw return over next 135 minutes minus benchmark return,135.0,first bar open at/after decision availability,close after 135 minutes,benchmark_adjusted,True
+fwd_return_140m_benchmark_adjusted,Raw return over next 140 minutes minus benchmark return,140.0,first bar open at/after decision availability,close after 140 minutes,benchmark_adjusted,True
+fwd_return_145m_benchmark_adjusted,Raw return over next 145 minutes minus benchmark return,145.0,first bar open at/after decision availability,close after 145 minutes,benchmark_adjusted,True
+fwd_return_150m_benchmark_adjusted,Raw return over next 150 minutes minus benchmark return,150.0,first bar open at/after decision availability,close after 150 minutes,benchmark_adjusted,True
+fwd_return_155m_benchmark_adjusted,Raw return over next 155 minutes minus benchmark return,155.0,first bar open at/after decision availability,close after 155 minutes,benchmark_adjusted,True
+fwd_return_160m_benchmark_adjusted,Raw return over next 160 minutes minus benchmark return,160.0,first bar open at/after decision availability,close after 160 minutes,benchmark_adjusted,True
+fwd_return_165m_benchmark_adjusted,Raw return over next 165 minutes minus benchmark return,165.0,first bar open at/after decision availability,close after 165 minutes,benchmark_adjusted,True
+fwd_return_170m_benchmark_adjusted,Raw return over next 170 minutes minus benchmark return,170.0,first bar open at/after decision availability,close after 170 minutes,benchmark_adjusted,True
+fwd_return_175m_benchmark_adjusted,Raw return over next 175 minutes minus benchmark return,175.0,first bar open at/after decision availability,close after 175 minutes,benchmark_adjusted,True
+fwd_return_180m_benchmark_adjusted,Raw return over next 180 minutes minus benchmark return,180.0,first bar open at/after decision availability,close after 180 minutes,benchmark_adjusted,True
+fwd_return_185m_benchmark_adjusted,Raw return over next 185 minutes minus benchmark return,185.0,first bar open at/after decision availability,close after 185 minutes,benchmark_adjusted,True
+fwd_return_190m_benchmark_adjusted,Raw return over next 190 minutes minus benchmark return,190.0,first bar open at/after decision availability,close after 190 minutes,benchmark_adjusted,True
+fwd_return_195m_benchmark_adjusted,Raw return over next 195 minutes minus benchmark return,195.0,first bar open at/after decision availability,close after 195 minutes,benchmark_adjusted,True
+fwd_return_200m_benchmark_adjusted,Raw return over next 200 minutes minus benchmark return,200.0,first bar open at/after decision availability,close after 200 minutes,benchmark_adjusted,True
+fwd_return_205m_benchmark_adjusted,Raw return over next 205 minutes minus benchmark return,205.0,first bar open at/after decision availability,close after 205 minutes,benchmark_adjusted,True
+fwd_return_210m_benchmark_adjusted,Raw return over next 210 minutes minus benchmark return,210.0,first bar open at/after decision availability,close after 210 minutes,benchmark_adjusted,True
+fwd_return_215m_benchmark_adjusted,Raw return over next 215 minutes minus benchmark return,215.0,first bar open at/after decision availability,close after 215 minutes,benchmark_adjusted,True
+fwd_return_220m_benchmark_adjusted,Raw return over next 220 minutes minus benchmark return,220.0,first bar open at/after decision availability,close after 220 minutes,benchmark_adjusted,True
+fwd_return_225m_benchmark_adjusted,Raw return over next 225 minutes minus benchmark return,225.0,first bar open at/after decision availability,close after 225 minutes,benchmark_adjusted,True
+fwd_return_230m_benchmark_adjusted,Raw return over next 230 minutes minus benchmark return,230.0,first bar open at/after decision availability,close after 230 minutes,benchmark_adjusted,True
+fwd_return_235m_benchmark_adjusted,Raw return over next 235 minutes minus benchmark return,235.0,first bar open at/after decision availability,close after 235 minutes,benchmark_adjusted,True
+fwd_return_240m_benchmark_adjusted,Raw return over next 240 minutes minus benchmark return,240.0,first bar open at/after decision availability,close after 240 minutes,benchmark_adjusted,True
+fwd_return_245m_benchmark_adjusted,Raw return over next 245 minutes minus benchmark return,245.0,first bar open at/after decision availability,close after 245 minutes,benchmark_adjusted,True
+fwd_return_250m_benchmark_adjusted,Raw return over next 250 minutes minus benchmark return,250.0,first bar open at/after decision availability,close after 250 minutes,benchmark_adjusted,True
+fwd_return_255m_benchmark_adjusted,Raw return over next 255 minutes minus benchmark return,255.0,first bar open at/after decision availability,close after 255 minutes,benchmark_adjusted,True
+fwd_return_260m_benchmark_adjusted,Raw return over next 260 minutes minus benchmark return,260.0,first bar open at/after decision availability,close after 260 minutes,benchmark_adjusted,True
+fwd_return_265m_benchmark_adjusted,Raw return over next 265 minutes minus benchmark return,265.0,first bar open at/after decision availability,close after 265 minutes,benchmark_adjusted,True
+fwd_return_270m_benchmark_adjusted,Raw return over next 270 minutes minus benchmark return,270.0,first bar open at/after decision availability,close after 270 minutes,benchmark_adjusted,True
+fwd_return_275m_benchmark_adjusted,Raw return over next 275 minutes minus benchmark return,275.0,first bar open at/after decision availability,close after 275 minutes,benchmark_adjusted,True
+fwd_return_280m_benchmark_adjusted,Raw return over next 280 minutes minus benchmark return,280.0,first bar open at/after decision availability,close after 280 minutes,benchmark_adjusted,True
+fwd_return_285m_benchmark_adjusted,Raw return over next 285 minutes minus benchmark return,285.0,first bar open at/after decision availability,close after 285 minutes,benchmark_adjusted,True
+fwd_return_290m_benchmark_adjusted,Raw return over next 290 minutes minus benchmark return,290.0,first bar open at/after decision availability,close after 290 minutes,benchmark_adjusted,True
+fwd_return_295m_benchmark_adjusted,Raw return over next 295 minutes minus benchmark return,295.0,first bar open at/after decision availability,close after 295 minutes,benchmark_adjusted,True
+fwd_return_300m_benchmark_adjusted,Raw return over next 300 minutes minus benchmark return,300.0,first bar open at/after decision availability,close after 300 minutes,benchmark_adjusted,True
+fwd_return_305m_benchmark_adjusted,Raw return over next 305 minutes minus benchmark return,305.0,first bar open at/after decision availability,close after 305 minutes,benchmark_adjusted,True
+fwd_return_310m_benchmark_adjusted,Raw return over next 310 minutes minus benchmark return,310.0,first bar open at/after decision availability,close after 310 minutes,benchmark_adjusted,True
+fwd_return_315m_benchmark_adjusted,Raw return over next 315 minutes minus benchmark return,315.0,first bar open at/after decision availability,close after 315 minutes,benchmark_adjusted,True
+fwd_return_320m_benchmark_adjusted,Raw return over next 320 minutes minus benchmark return,320.0,first bar open at/after decision availability,close after 320 minutes,benchmark_adjusted,True
+fwd_return_325m_benchmark_adjusted,Raw return over next 325 minutes minus benchmark return,325.0,first bar open at/after decision availability,close after 325 minutes,benchmark_adjusted,True
+fwd_return_330m_benchmark_adjusted,Raw return over next 330 minutes minus benchmark return,330.0,first bar open at/after decision availability,close after 330 minutes,benchmark_adjusted,True
+fwd_return_335m_benchmark_adjusted,Raw return over next 335 minutes minus benchmark return,335.0,first bar open at/after decision availability,close after 335 minutes,benchmark_adjusted,True
+fwd_return_340m_benchmark_adjusted,Raw return over next 340 minutes minus benchmark return,340.0,first bar open at/after decision availability,close after 340 minutes,benchmark_adjusted,True
+fwd_return_345m_benchmark_adjusted,Raw return over next 345 minutes minus benchmark return,345.0,first bar open at/after decision availability,close after 345 minutes,benchmark_adjusted,True
+fwd_return_350m_benchmark_adjusted,Raw return over next 350 minutes minus benchmark return,350.0,first bar open at/after decision availability,close after 350 minutes,benchmark_adjusted,True
+fwd_return_355m_benchmark_adjusted,Raw return over next 355 minutes minus benchmark return,355.0,first bar open at/after decision availability,close after 355 minutes,benchmark_adjusted,True
+fwd_return_360m_benchmark_adjusted,Raw return over next 360 minutes minus benchmark return,360.0,first bar open at/after decision availability,close after 360 minutes,benchmark_adjusted,True
+fwd_return_365m_benchmark_adjusted,Raw return over next 365 minutes minus benchmark return,365.0,first bar open at/after decision availability,close after 365 minutes,benchmark_adjusted,True
+fwd_return_370m_benchmark_adjusted,Raw return over next 370 minutes minus benchmark return,370.0,first bar open at/after decision availability,close after 370 minutes,benchmark_adjusted,True
+fwd_return_375m_benchmark_adjusted,Raw return over next 375 minutes minus benchmark return,375.0,first bar open at/after decision availability,close after 375 minutes,benchmark_adjusted,True
+fwd_return_380m_benchmark_adjusted,Raw return over next 380 minutes minus benchmark return,380.0,first bar open at/after decision availability,close after 380 minutes,benchmark_adjusted,True
+fwd_return_385m_benchmark_adjusted,Raw return over next 385 minutes minus benchmark return,385.0,first bar open at/after decision availability,close after 385 minutes,benchmark_adjusted,True
+fwd_return_eod_benchmark_adjusted,Raw return from next actionable open to RTH close minus benchmark return,,first bar open at/after decision availability,final complete RTH bar close,benchmark_adjusted,True
