@@ -3,9 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from pathlib import Path
 
 from quant_pipeline.config import ScanConfig
 from quant_pipeline.diagnostics import _causal_dispersion_bucket,exact_time_diagnostics,phase2_recommendation,regime_diagnostics,scope_diagnostics
+from quant_pipeline.report import write_reports
 
 
 def panel(days=130):
@@ -68,3 +70,22 @@ def test_all_new_diagnostics_reject_holdout_rows():
     with pytest.raises(ValueError,match="holdout"):regime_diagnostics(frame,"x","y",1,diagnostic_config())
     with pytest.raises(ValueError,match="holdout"):scope_diagnostics(frame,"x","y",1,"broad_across_symbols",diagnostic_config())
     with pytest.raises(ValueError,match="holdout"):exact_time_diagnostics(frame,"x","y",1,diagnostic_config())
+
+
+def test_public_production_yaml_loads_every_diagnostic_interface():
+    path=Path(__file__).resolve().parents[1]/"configs"/"discovery_5m.yaml"; config=ScanConfig.from_yaml(path)
+    assert config.use_separate_confirmation_period is False
+    assert config.recency_half_lives_months==[6,12,24]
+    assert config.trend_threshold_bps==20 and config.gap_threshold_bps==20
+    assert config.regime_min_observations==500 and config.scope_min_observations==500 and config.exact_time_min_observations==500
+
+
+def test_tiny_synthetic_reporting_reaches_final_report(tmp_path):
+    results=pd.DataFrame([{"feature":"x","target":"fwd_return_5m","status":"robust_phase1_anomaly_candidate","candidate_cluster":"x__short","top_bottom_spread":.001,"bh_fdr_p":.01,"regime_summary_label":"regime_persistent","sector_scope_status":"unavailable_missing_point_in_time_sector_data","industry_scope_status":"unavailable_missing_point_in_time_industry_data","scope_classification":"insufficient_scope_evidence","strongest_exact_decision_time":"09:45","weakest_exact_decision_time":"15:45","time_concentration_label":"persistent_through_session","phase2_recommendation":"retain_for_monitoring","phase2_recommendation_reason":"Synthetic interface test","phase2_main_limitation":"Synthetic data","phase2_suggested_test":"Real Phase 2 test"}])
+    pd.DataFrame([{"feature":"x","target":"fwd_return_5m","raw_p":.01,"primary_global_fdr":.01,"primary_test_count":1,"exploratory_test_count":0}]).to_csv(tmp_path/"master_results.csv",index=False)
+    pd.DataFrame([{"name":"x"}]).to_csv(tmp_path/"feature_registry.csv",index=False); pd.DataFrame([{"name":"fwd_return_5m"}]).to_csv(tmp_path/"target_registry.csv",index=False)
+    config=ScanConfig(start="2024-02-01",discovery_end="2024-02-29")
+    write_reports(results,{},tmp_path,config=config,run_metadata={"fingerprint":"synthetic","git_commit":"test"})
+    report=(tmp_path/"report.md").read_text(encoding="utf-8")
+    assert (tmp_path/"ranked_candidates.html").exists()
+    assert all(section in report for section in ["Regime summary","Scope summary","Exact-time summary","Phase 2 recommendation"])
