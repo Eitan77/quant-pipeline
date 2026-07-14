@@ -13,12 +13,20 @@ class FeatureSpec:
     classification: str = "time_series"  # time_series|cross_sectional|context|categorical
     cutoff: str = "completed_bar_available_at"
     calculation_frequency: str = "5m"
-    price_basis: str = "raw_execution_price"
+    price_basis: str = "split_adjusted_research_price"
     dtype: str = "continuous"
     missing_rule: str = "exclude_pairwise"
     directional_meaning: str = "none"
     status: str = "requested"
     unavailable_reason: str | None = None
+    required_columns: tuple[str, ...] = ()
+    minimum_history_bars: int = 0
+    session_reset: bool = True
+    uses_current_bar: bool = True
+    uses_previous_sessions: bool = False
+    feature_available_offset_minutes: int = 0
+    eligibility_requirement: str = "tradable_at_decision"
+    baseline_inclusion: str = "not_applicable"
 
 
 @dataclass(frozen=True)
@@ -30,25 +38,31 @@ class TargetSpec:
     exit_definition: str
     classification: str = "raw"
     overlaps: bool = True
+    tier: str = "exploratory"
+    price_basis: str = "raw_execution_price"
 
 
-def target_registry(horizons: Iterable[int] | None = None) -> list[TargetSpec]:
+def target_registry(horizons: Iterable[int] | None = None, primary_horizons: Iterable[int] | None = None) -> list[TargetSpec]:
     horizons = list(horizons) if horizons is not None else list(range(5, 390, 5))
+    primary=set(primary_horizons or [5,15,30,60,120])
     raw = [
-        TargetSpec(f"fwd_return_{m}m", f"Raw return over next {m} minutes", m, "first bar open at/after decision availability", f"close after {m} minutes")
+        TargetSpec(f"fwd_return_{m}m", f"Raw return over next {m} minutes", m, "first bar open at/after decision availability", f"first close at/after entry plus {m} minutes", tier="primary" if m in primary else "exploratory")
         for m in horizons
-    ] + [TargetSpec("fwd_return_eod", "Raw return from next actionable open to RTH close", None, "first bar open at/after decision availability", "final complete RTH bar close")]
-    adjusted = [TargetSpec(t.name+"_benchmark_adjusted", t.description+" minus benchmark return", t.horizon_minutes, t.entry_definition, t.exit_definition, "benchmark_adjusted", t.overlaps) for t in raw]
+    ] + [TargetSpec("fwd_return_eod", "Raw return from next actionable open to scheduled RTH close", None, "first bar open at/after decision availability", "scheduled final complete RTH bar close", tier="primary")]
+    adjusted = [TargetSpec(t.name+"_benchmark_adjusted", t.description+" minus benchmark return", t.horizon_minutes, t.entry_definition, t.exit_definition, "benchmark_adjusted", t.overlaps, t.tier) for t in raw]
     return raw + adjusted
 
 
 def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, opening_windows: Iterable[int] | None = None) -> list[FeatureSpec]:
     """Registry is the scanner authority; construction never guesses by name."""
     out: list[FeatureSpec] = []
-    def add(name: str, description: str, family: str, lb: int | None = None, cls: str = "time_series", direction: str = "none", status: str = "requested", reason: str | None = None) -> None:
-        out.append(FeatureSpec(name, description, family, lb, cls, directional_meaning=direction, status=status, unavailable_reason=reason))
+    def add(name: str, description: str, family: str, lb: int | None = None, cls: str = "time_series", direction: str = "none", status: str = "requested", reason: str | None = None, **metadata) -> None:
+        previous_session_names={"overnight_gap","previous_session_return","continuous_return_1"}
+        defaults={"required_columns":("symbol","session_date","decision_ts","open_adjusted","high_adjusted","low_adjusted","close_adjusted","volume"),"minimum_history_bars":int(lb or 0),"session_reset":family not in {"normalization","sector"} and name not in previous_session_names,"uses_previous_sessions":family in {"normalization","sector"} or name in previous_session_names or name.startswith("session_return_"),"feature_available_offset_minutes":0,"eligibility_requirement":"point_in_time_tradable_cross_section" if cls=="cross_sectional" else "valid_completed_bar"}
+        defaults.update(metadata)
+        out.append(FeatureSpec(name, description, family, lb, cls, directional_meaning=direction, status=status, unavailable_reason=reason, **defaults))
     rolling = {
-        "return": ("simple return", "momentum"), "log_return": ("log return", "momentum"),
+        "return": ("session-reset intraday simple return", "momentum"), "log_return": ("session-reset intraday log return", "momentum"),
         "realized_vol": ("return standard deviation", "volatility"), "downside_vol": ("downside volatility", "volatility"),
         "upside_vol": ("upside volatility", "volatility"), "return_vol_ratio": ("return divided by volatility", "momentum"),
         "volume_sum": ("volume sum", "volume"), "volume_mean": ("average volume", "volume"),
@@ -65,9 +79,13 @@ def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, o
     }
     for n in lookbacks:
         for prefix, (desc, family) in rolling.items(): add(f"{prefix}_{n}", f"{n}-bar {desc}", family, n)
+        add(f"relative_volume_prior_{n}",f"current volume divided by prior {n}-bar intraday mean","volume",n,baseline_inclusion="prior_only")
+        add(f"relative_volume_inclusive_{n}",f"current volume divided by inclusive {n}-bar intraday mean","volume",n,baseline_inclusion="inclusive")
         for base in ["return", "relative_volume", "realized_vol", "range_position", "return_vol_ratio"]:
             add(f"{base}_rank_{n}", f"cross-sectional percentile rank of {base}_{n}", "cross_sectional", n, "cross_sectional")
     for name, desc, family in [
+        ("intraday_return_1", "one-bar session-reset intraday return", "momentum"),
+        ("continuous_return_1", "continuous close-to-close return including overnight movement", "momentum"),
         ("return_since_open", "return from session opening price", "opening"), ("overnight_gap", "open versus prior session close", "opening"),
         ("previous_session_return", "previous session close-to-close return", "momentum"), ("bar_range_pct", "bar high-low range / close", "volatility"),
         ("body_to_range", "absolute body divided by range", "bar_structure"), ("upper_wick_to_range", "upper wick divided by range", "bar_structure"),
@@ -88,8 +106,10 @@ def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, o
         ("consecutive_positive_bars", "positive-bar run length", "momentum"), ("consecutive_negative_bars", "negative-bar run length", "momentum"),
         ("month", "calendar month", "calendar"), ("quarter", "calendar quarter", "calendar"),
         ("minute_of_session", "regular-session minute", "calendar"), ("minutes_until_close", "minutes to regular close", "calendar"),
+        ("decision_time_bucket", "30-minute decision-time bucket", "calendar"),
         ("market_up", "benchmark positive at decision", "market_context"), ("high_market_vol", "benchmark volatility above expanding median", "market_context"),
-    ]: add(name, desc, family, cls="categorical" if name == "day_of_week" else "time_series")
+    ]: add(name, desc, family, cls="categorical" if name in {"day_of_week","month","quarter","market_up","high_market_vol","decision_time_bucket"} else "time_series",dtype="categorical" if name in {"day_of_week","month","quarter","market_up","high_market_vol","decision_time_bucket"} else "continuous")
+    for name,desc in [("decision_time_sin","cyclical sine encoding of decision minute"),("decision_time_cos","cyclical cosine encoding of decision minute")]:add(name,desc,"calendar")
     for minutes in (list(opening_windows) if opening_windows is not None else [1,3,5,10,15,20,30,45,60,90]):
         for base in ["opening_return", "opening_range", "opening_volume", "opening_realized_vol", "opening_close_location", "distance_opening_high", "distance_opening_low", "opening_breakout", "opening_breakdown"]:
             add(f"{base}_{minutes}m", f"{base.replace('_',' ')} after completed {minutes}-minute opening window", "opening", minutes)
@@ -112,6 +132,7 @@ def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, o
     for n in lookbacks:
         add(f"market_return_{n}", f"benchmark {n}-bar return", "market_context", n)
         add(f"stock_minus_market_return_{n}", f"stock minus benchmark {n}-bar return", "market_context", n)
+    for n in [20,60]:add(f"market_residual_return_{n}",f"stock return minus prior-only rolling beta times benchmark return over {n} bars","market_context",n,uses_previous_sessions=True,baseline_inclusion="prior_only")
     reason = "No point-in-time sector classification supplied" if not sector_available else None
     for name in ["sector_return", "stock_minus_sector_return", "sector_rank", "sector_breadth_positive"]:
         add(name, "Sector-dependent feature", "sector", status="requested" if sector_available else "unavailable", reason=reason)

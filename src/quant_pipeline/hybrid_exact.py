@@ -7,12 +7,13 @@ import pandas as pd
 from scipy import stats
 
 
-def gpu_dense_pair(feature_path: Path, target_path: Path, feature: str, target: str, min_bin: int) -> tuple[dict, list[dict]]:
+def gpu_dense_pair(feature_path: Path, target_path: Path, feature: str, target: str, min_bin: int,selection_end:str) -> tuple[dict, list[dict]]:
     """Exact dense pair statistics on CUDA; grouped diagnostics stay on CPU."""
     import torch
 
-    x=pd.read_parquet(feature_path,columns=[feature])[feature].to_numpy(dtype=np.float32,copy=False)
-    y=pd.read_parquet(target_path,columns=[target])[target].to_numpy(dtype=np.float32,copy=False)
+    ff=pd.read_parquet(feature_path,columns=["session_date","scan_eligible","session_grid_eligible",feature]); mask=pd.to_datetime(ff.session_date).le(pd.Timestamp(selection_end))&ff.scan_eligible.fillna(False)&ff.session_grid_eligible.fillna(False)
+    x=ff.loc[mask,feature].to_numpy(dtype=np.float32,copy=False)
+    y=pd.read_parquet(target_path,columns=[target]).loc[mask,target].to_numpy(dtype=np.float32,copy=False)
     valid=np.isfinite(x)&np.isfinite(y); x=x[valid]; y=y[valid]
     device=torch.device("cuda:0"); tx=torch.as_tensor(x,device=device); ty=torch.as_tensor(y,device=device)
     pearson=float(_corr(tx,ty).item())

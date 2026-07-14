@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from math import erf, sqrt
 
 import numpy as np
@@ -27,11 +28,41 @@ def _clustered_slope(x: np.ndarray, y: np.ndarray, clusters: np.ndarray) -> tupl
     return float(beta[1]),se,t,_normal_pvalue(t) if np.isfinite(t) else np.nan
 
 
-def _quantiles(x: pd.Series, y: pd.Series, q: int, min_bin: int) -> tuple[dict, pd.DataFrame]:
+def _cluster_scores(x: np.ndarray, residual: np.ndarray, clusters: np.ndarray) -> np.ndarray:
+    codes,_=pd.factorize(clusters,sort=False)
+    return np.column_stack((np.bincount(codes,weights=residual),np.bincount(codes,weights=x*residual)))
+
+
+def _two_way_clustered_slope(x: np.ndarray,y: np.ndarray,dates: np.ndarray,symbols: np.ndarray) -> tuple[float,float,float]:
+    X=np.column_stack((np.ones(len(x)),x)); bread=np.linalg.pinv(X.T@X); beta=bread@(X.T@y); residual=y-X@beta
+    date_scores=_cluster_scores(x,residual,dates); symbol_scores=_cluster_scores(x,residual,symbols)
+    observation_scores=X*residual[:,None]
+    meat=date_scores.T@date_scores+symbol_scores.T@symbol_scores-observation_scores.T@observation_scores
+    variance=bread@meat@bread; se=float(np.sqrt(max(variance[1,1],0))); t=float(beta[1]/se) if se else np.nan
+    return se,t,_normal_pvalue(t) if np.isfinite(t) else np.nan
+
+
+def _hac_mean(series: pd.Series,max_lag: int|None=None) -> tuple[float,float,float]:
+    values=pd.Series(series,dtype=float).dropna().to_numpy()
+    if len(values)<3:return (float(np.mean(values)) if len(values) else np.nan,np.nan,np.nan)
+    centered=values-values.mean(); lag=max_lag if max_lag is not None else max(1,int(4*(len(values)/100)**(2/9)))
+    long_var=float(centered@centered/len(values))
+    for k in range(1,min(lag,len(values)-1)+1):
+        gamma=float(centered[k:]@centered[:-k]/len(values)); long_var+=2*(1-k/(lag+1))*gamma
+    se=float(np.sqrt(max(long_var,0)/len(values))); t=float(values.mean()/se) if se else np.nan
+    return float(values.mean()),se,t
+
+
+def _quantiles(x: pd.Series, y: pd.Series, sessions: pd.Series, q: int, min_bin: int, bootstrap_samples: int=500) -> tuple[dict, pd.DataFrame]:
     try: bins=pd.qcut(x.rank(method="first"),q,labels=False,duplicates="drop")
     except ValueError: return {"top_bottom_spread":np.nan,"monotonicity":np.nan,"shape":"insufficient"},pd.DataFrame()
-    tab=pd.DataFrame({"bin":bins,"target":y}).groupby("bin",observed=True).target.agg(["count","mean","median",lambda z:(z>0).mean(),"std"]).rename(columns={"<lambda_0>":"win_rate"}).reset_index()
-    tab["se"]=tab["std"]/np.sqrt(tab["count"]); tab["ci_low"]=tab["mean"]-1.96*tab.se; tab["ci_high"]=tab["mean"]+1.96*tab.se
+    work=pd.DataFrame({"bin":bins,"target":y,"session":sessions}).dropna()
+    tab=work.groupby("bin",observed=True).target.agg(["count","mean","median",lambda z:(z>0).mean(),"std"]).rename(columns={"<lambda_0>":"win_rate"}).reset_index()
+    daily=work.groupby(["session","bin"],observed=True).target.mean().unstack("bin")
+    session_stats=[]
+    for b in tab.bin:
+        mean,se,t=_hac_mean(daily.get(b,pd.Series(dtype=float))); session_stats.append((se,mean-1.96*se if np.isfinite(se) else np.nan,mean+1.96*se if np.isfinite(se) else np.nan))
+    tab[["se","ci_low","ci_high"]]=pd.DataFrame(session_stats,index=tab.index)
     if len(tab)<3 or tab["count"].min()<min_bin: return {"top_bottom_spread":np.nan,"monotonicity":np.nan,"shape":"insufficient"},tab
     rho=float(stats.spearmanr(tab.bin,tab["mean"]).statistic); spread=float(tab["mean"].iloc[-1]-tab["mean"].iloc[0]); diffs=np.diff(tab["mean"])
     if abs(rho)>=.7: shape="positive_monotonic" if rho>0 else "negative_monotonic"
@@ -40,23 +71,66 @@ def _quantiles(x: pd.Series, y: pd.Series, q: int, min_bin: int) -> tuple[dict, 
     elif tab["mean"].iloc[len(tab)//2] < min(tab["mean"].iloc[0],tab["mean"].iloc[-1]): shape="u_shaped"
     elif abs(diffs[-1])>2*np.nanmedian(abs(diffs[:-1])): shape="positive_tail" if diffs[-1]>0 else "negative_tail"
     else: shape="no_stable_shape"
-    return {"top_bottom_spread":spread,"monotonicity":rho,"shape":shape},tab
+    spread_series=(daily.iloc[:,-1]-daily.iloc[:,0]).dropna() if daily.shape[1]>=2 else pd.Series(dtype=float)
+    _,spread_se,spread_t=_hac_mean(spread_series)
+    if len(spread_series) and bootstrap_samples:
+        rng=np.random.default_rng(20260714); boot=np.asarray([rng.choice(spread_series.to_numpy(),len(spread_series),replace=True).mean() for _ in range(bootstrap_samples)])
+        boot_low,boot_high=np.quantile(boot,[.025,.975])
+    else: boot_low=boot_high=np.nan
+    return {"top_bottom_spread":spread,"monotonicity":rho,"shape":shape,"daily_spread_hac_se":spread_se,"daily_spread_hac_t":spread_t,"session_bootstrap_ci_low":boot_low,"session_bootstrap_ci_high":boot_high},tab
 
 
-def _cross_sectional_ic(frame: pd.DataFrame, feature: str, target: str) -> dict:
+def _cross_sectional_ic(frame: pd.DataFrame, feature: str, target: str,min_symbols:int) -> dict:
     groups=frame["decision_ts"]
     xr=frame[feature].groupby(groups,sort=False).rank(method="average")
     yr=frame[target].groupby(groups,sort=False).rank(method="average")
     work=pd.DataFrame({"group":groups,"x":xr,"y":yr}); work["xx"]=xr*xr; work["yy"]=yr*yr; work["xy"]=xr*yr
     agg=work.groupby("group",sort=False).agg(n=("x","size"),sx=("x","sum"),sy=("y","sum"),sxx=("xx","sum"),syy=("yy","sum"),sxy=("xy","sum"))
     cov=agg.sxy-agg.sx*agg.sy/agg.n; vx=agg.sxx-agg.sx*agg.sx/agg.n; vy=agg.syy-agg.sy*agg.sy/agg.n
-    ic=(cov/np.sqrt(vx*vy)).replace([np.inf,-np.inf],np.nan).dropna()
+    ic=(cov/np.sqrt(vx*vy)).where(agg.n.ge(min_symbols)).replace([np.inf,-np.inf],np.nan).dropna()
     if len(ic)<2:return {"ic_mean":np.nan,"ic_median":np.nan,"ic_std":np.nan,"ic_t":np.nan,"ic_positive_pct":np.nan}
-    return {"ic_mean":float(ic.mean()),"ic_median":float(ic.median()),"ic_std":float(ic.std(ddof=1)),"ic_t":float(ic.mean()/(ic.std(ddof=1)/sqrt(len(ic)))),"ic_positive_pct":float((ic>0).mean())}
+    daily=ic.groupby(pd.to_datetime(ic.index,utc=True).date).mean(); mean,se,t=_hac_mean(daily)
+    index=pd.to_datetime(ic.index,utc=True); by_year=ic.groupby(index.year).mean().to_dict(); local=index.tz_convert("America/New_York"); by_time=ic.groupby(local.strftime("%H:%M")).mean().to_dict()
+    return {"ic_mean":float(ic.mean()),"ic_median":float(ic.median()),"ic_std":float(ic.std(ddof=1)),"ic_information_ratio":float(ic.mean()/ic.std(ddof=1)) if ic.std(ddof=1) else np.nan,"ic_hac_se":se,"ic_hac_t":t,"ic_positive_pct":float((ic>0).mean()),"ic_timestamps":len(ic),"ic_days":len(daily),"ic_by_year":json.dumps(by_year,sort_keys=True),"ic_by_time_of_day":json.dumps(by_time,sort_keys=True)}
+
+
+def _outlier_diagnostics(sub:pd.DataFrame,feature:str,target:str,direction:float) -> dict:
+    def metrics(z):
+        if len(z)<10:return (np.nan,np.nan)
+        rho=float(z[feature].corr(z[target],method="spearman")); bins=pd.qcut(z[feature].rank(method="first"),10,labels=False,duplicates="drop"); means=z.groupby(bins,observed=True)[target].mean(); spread=float(means.iloc[-1]-means.iloc[0]) if len(means)>1 else np.nan
+        return rho,spread
+    base_rho,base_spread=metrics(sub); results={}
+    variants={
+        "feature_winsor":sub.assign(**{feature:sub[feature].clip(sub[feature].quantile(.01),sub[feature].quantile(.99))}),
+        "target_winsor":sub.assign(**{target:sub[target].clip(sub[target].quantile(.01),sub[target].quantile(.99))}),
+        "remove_target_001":sub.loc[sub[target].abs().le(sub[target].abs().quantile(.999))],
+        "remove_target_005":sub.loc[sub[target].abs().le(sub[target].abs().quantile(.995))],
+        "remove_target_01":sub.loc[sub[target].abs().le(sub[target].abs().quantile(.99))],
+    }
+    variants["both_winsor"]=variants["feature_winsor"].assign(**{target:sub[target].clip(sub[target].quantile(.01),sub[target].quantile(.99))})
+    day_mean=sub.groupby("session_date")[target].mean().sort_values(ascending=False)
+    symbol_mean=sub.groupby("symbol")[target].mean().sort_values(ascending=False)
+    variants["remove_best_day"]=sub.loc[~sub.session_date.isin(day_mean.head(1).index)]; variants["remove_best_five_days"]=sub.loc[~sub.session_date.isin(day_mean.head(5).index)]
+    variants["remove_best_symbol"]=sub.loc[~sub.symbol.isin(symbol_mean.head(1).index)]; variants["remove_top_ten_observations"]=sub.drop(sub[target].nlargest(min(10,len(sub))).index)
+    signed=[]
+    for name,z in variants.items():
+        rho,spread=metrics(z); results[f"sensitivity_{name}_spearman"]=rho; results[f"sensitivity_{name}_spread"]=spread
+        if np.isfinite(spread):signed.append(spread*np.sign(direction))
+    results["outlier_worst_signed_spread"]=min(signed) if signed else np.nan
+    results["outlier_sensitivity"]=max([abs(base_spread-v) for v in signed if np.isfinite(base_spread)] or [np.nan])
+    return results
 
 
 def benjamini_hochberg(values: pd.Series) -> pd.Series:
     valid=values.notna(); p=values[valid].to_numpy(); order=np.argsort(p); ranked=p[order]; adj=np.minimum.accumulate((ranked*len(p)/np.arange(1,len(p)+1))[::-1])[::-1]; out=pd.Series(np.nan,index=values.index); out.loc[values[valid].iloc[order].index]=np.minimum(adj,1); return out
+
+
+def _signed_decile_spread(frame:pd.DataFrame,feature:str,target:str)->float:
+    if len(frame)<20:return np.nan
+    try:bins=pd.qcut(frame[feature].rank(method="first"),10,labels=False,duplicates="drop")
+    except ValueError:return np.nan
+    means=frame.groupby(bins,observed=True)[target].mean()
+    return float(means.iloc[-1]-means.iloc[0]) if len(means)>1 else np.nan
 
 
 def scan(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], config: ScanConfig, checkpoint_path=None, *, skip_dense: bool=False, direction_hint: float | None=None) -> tuple[pd.DataFrame, dict[tuple[str,str],pd.DataFrame]]:
@@ -68,30 +142,37 @@ def scan(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], c
         for target in targets:
             if (spec.name,target) in completed: continue
             sub=frame[["session_date","symbol","decision_ts",spec.name,target]].replace([np.inf,-np.inf],np.nan).dropna()
-            base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"n":len(sub),"sessions":sub.session_date.nunique(),"symbols":sub.symbol.nunique()}
-            if len(sub)<config.min_observations or base["sessions"]<config.min_sessions or base["symbols"]<config.min_symbols:
+            base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"table_rows":len(frame),"n":len(sub),"valid_observations":len(sub),"sessions":sub.session_date.nunique(),"valid_sessions":sub.session_date.nunique(),"symbols":sub.symbol.nunique(),"valid_symbols":sub.symbol.nunique(),"valid_decision_timestamps":sub.decision_ts.nunique(),"valid_years":pd.to_datetime(sub.session_date).dt.year.nunique(),"raw_p":np.nan}
+            if len(sub)<config.min_observations or base["sessions"]<config.min_sessions or base["symbols"]<config.min_symbols or base["valid_decision_timestamps"]<config.min_decision_timestamps or base["valid_years"]<config.min_years:
                 rows.append({**base,"status":"insufficient_data"});continue
             x=sub[spec.name].astype(float);y=sub[target].astype(float)
+            if spec.classification=="categorical" or spec.dtype=="categorical":
+                categories=sub.groupby(spec.name)[target].agg(["count","mean","median"]); groups=[z[target].to_numpy() for _,z in sub.groupby(spec.name) if len(z)>=config.min_bin_observations]
+                omnibus_p=float(stats.kruskal(*groups).pvalue) if len(groups)>=2 else np.nan
+                rows.append({**base,"raw_p":omnibus_p,"category_count":len(categories),"category_max_minus_min":float(categories["mean"].max()-categories["mean"].min()),"status":"categorical_screened"})
+                quantile_tables[(spec.name,target)]=categories.reset_index().rename(columns={spec.name:"category"})
+                continue
             slope,se,t,p=_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy())
+            two_way_se,two_way_t,two_way_p=_two_way_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy(),sub.symbol.to_numpy())
             if skip_dense:
                 qstats={"top_bottom_spread":np.nan,"monotonicity":np.nan,"shape":"pending_gpu"}; qtab=pd.DataFrame(); pearson=spearman=np.nan
             else:
-                qstats,qtab=_quantiles(x,y,config.quantiles,config.min_bin_observations); pearson,spearman=backend.correlations(x.to_numpy(),y.to_numpy())
-            annual=sub.assign(year=pd.to_datetime(sub.session_date).dt.year).groupby("year").apply(lambda z:z[spec.name].corr(z[target],method="spearman"),include_groups=False).dropna()
-            symbol_corr=sub.groupby("symbol").apply(lambda z:z[spec.name].corr(z[target],method="spearman"),include_groups=False).dropna()
-            if skip_dense: outlier_sensitivity=np.nan
-            else:
-                clipped=x.clip(x.quantile(.01),x.quantile(.99)); clip_corr=float(clipped.corr(y,method="spearman")); outlier_sensitivity=abs(spearman-clip_corr)
-            cs=_cross_sectional_ic(sub,spec.name,target) if spec.classification=="cross_sectional" else {}
+                qstats,qtab=_quantiles(x,y,sub.session_date,config.quantiles,config.min_bin_observations,config.exact_bootstrap_samples); pearson,spearman=backend.correlations(x.to_numpy(),y.to_numpy())
+            annual_effect=sub.assign(year=pd.to_datetime(sub.session_date).dt.year).groupby("year").apply(lambda z:_signed_decile_spread(z,spec.name,target),include_groups=False).dropna()
+            symbol_effect=sub.groupby("symbol").filter(lambda z:len(z)>=50).groupby("symbol").apply(lambda z:_signed_decile_spread(z,spec.name,target),include_groups=False).dropna()
+            cs=_cross_sectional_ic(sub,spec.name,target,config.cross_sectional_min_symbols) if spec.classification=="cross_sectional" else {}
             status="statistically_interesting" if p<.05 else "no_meaningful_relationship"
             local=pd.to_datetime(sub.decision_ts,utc=True).dt.tz_convert("America/New_York"); sub=sub.assign(time_bucket=(local.dt.hour*60+local.dt.minute).floordiv(60),year=pd.to_datetime(sub.session_date).dt.year)
             time_corr=sub.groupby("time_bucket").apply(lambda z:z[spec.name].corr(z[target],method="spearman"),include_groups=False).dropna()
-            direction=spearman if np.isfinite(spearman) else direction_hint
-            rows.append({**base,"mean_target":float(y.mean()),"median_target":float(y.median()),"std_target":float(y.std()),"win_rate":float((y>0).mean()),"skewness":float(stats.skew(y,nan_policy="omit")),"downside_p05":float(y.quantile(.05)),"upside_p95":float(y.quantile(.95)),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"raw_p":p,"ci_low":slope-1.96*se,"ci_high":slope+1.96*se,"year_consistency":float((annual*np.sign(direction)>0).mean()) if len(annual) and direction is not None else np.nan,"symbol_breadth":float((symbol_corr*np.sign(direction)>0).mean()) if len(symbol_corr) and direction is not None else np.nan,"time_stability":float((time_corr*np.sign(direction)>0).mean()) if len(time_corr) and direction is not None else np.nan,"outlier_sensitivity":outlier_sensitivity,"status":status,**qstats,**cs})
+            direction=spearman if np.isfinite(spearman) else direction_hint; signed_direction=np.sign(direction) if direction is not None and np.isfinite(direction) else 1
+            robustness={} if skip_dense else _outlier_diagnostics(sub,spec.name,target,direction)
+            rows.append({**base,"mean_target":float(y.mean()),"median_target":float(y.median()),"std_target":float(y.std()),"win_rate":float((y>0).mean()),"skewness":float(stats.skew(y,nan_policy="omit")),"downside_p05":float(y.quantile(.05)),"upside_p95":float(y.quantile(.95)),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"two_way_cluster_se":two_way_se,"two_way_cluster_t":two_way_t,"two_way_cluster_p":two_way_p,"raw_p":p,"ci_low":slope-1.96*se,"ci_high":slope+1.96*se,"year_consistency":float((annual_effect*signed_direction>0).mean()) if len(annual_effect) else np.nan,"symbol_breadth":float((symbol_effect*signed_direction>0).mean()) if len(symbol_effect) else np.nan,"median_annual_effect":float((annual_effect*signed_direction).median()) if len(annual_effect) else np.nan,"worst_annual_effect":float((annual_effect*signed_direction).min()) if len(annual_effect) else np.nan,"lower_quartile_annual_effect":float((annual_effect*signed_direction).quantile(.25)) if len(annual_effect) else np.nan,"years_above_minimum_effect":float((annual_effect*signed_direction>=config.minimum_effect_bps/10000).mean()) if len(annual_effect) else np.nan,"leave_one_year_out_effect":float((annual_effect*signed_direction).drop(annual_effect.idxmax()).mean()) if len(annual_effect)>1 else np.nan,"leave_one_symbol_out_effect":float((symbol_effect*signed_direction).drop(symbol_effect.idxmax()).mean()) if len(symbol_effect)>1 else np.nan,"time_stability":float((time_corr*signed_direction>0).mean()) if len(time_corr) else np.nan,"status":status,**qstats,**cs,**robustness})
             quantile_tables[(spec.name,target)]=qtab
             if checkpoint_path is not None and len(rows)%config.checkpoint_every_pairs==0: pd.DataFrame(rows).to_csv(checkpoint_path,index=False)
     result=pd.DataFrame(rows)
     if not result.empty:
+        for column in ["top_bottom_spread","monotonicity","year_consistency","symbol_breadth","outlier_sensitivity","cluster_t"]:
+            if column not in result:result[column]=np.nan
         result["target_family"]=result.target.str.replace(r"_benchmark_adjusted$","",regex=True)
         result["bh_fdr_p"]=result.groupby(["feature_family","target_family"],dropna=False).raw_p.transform(benjamini_hochberg)
         result["test_count"]=int(result.raw_p.notna().sum())

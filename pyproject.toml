@@ -10,11 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "duckdb>=1.5.0",
+  "exchange-calendars>=4.7.0",
   "matplotlib>=3.10.0",
   "numpy>=2.0.0",
   "pandas>=3.0.0",
   "pyarrow>=23.0.0",
   "pyyaml>=6.0.0",
+  "python-dotenv>=1.2.0",
   "scipy>=1.17.0",
   "torch>=2.5.0",
 ]
@@ -23,7 +25,7 @@ dependencies = [
 dev = ["pytest>=8.0.0"]
 
 [project.scripts]
-quant-pipeline = "quant_pipeline.cli:main"
+quant-pipeline = "quant_pipeline_launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

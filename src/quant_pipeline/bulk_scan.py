@@ -23,7 +23,7 @@ def cuda_screen(
 ) -> pd.DataFrame:
     """Vectorized all-pair screen; exact diagnostics are reserved for survivors."""
     completed={(r.feature,r.target) for r in prior.itertuples()} if not prior.empty else set()
-    active_features=[s for s in features if any((s.name,t) not in completed for t in targets)]
+    active_features=[s for s in features if s.classification!="categorical" and s.dtype!="categorical" and any((s.name,t) not in completed for t in targets)]
     if not active_features: return prior
     import torch
     device=torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
@@ -40,7 +40,9 @@ def cuda_screen(
     sample=np.linspace(0,len(feature_frame)-1,min(len(feature_frame),200_000),dtype=np.int64)
     rx=_percentile_bins(tx,x_np[sample],100); ry=_percentile_bins(ty,y_np[sample],100)
     rank_corr,*_=_pair_moments_stable(rx,ry)
-    sessions=max(3,feature_frame.session_date.nunique()); symbols=feature_frame.symbol.nunique(); rows=[]
+    decisions=feature_frame.decision_ts if "decision_ts" in feature_frame else pd.Series(np.arange(len(feature_frame)),index=feature_frame.index)
+    session_codes=pd.factorize(feature_frame.session_date,sort=False)[0]; symbol_codes=pd.factorize(feature_frame.symbol,sort=False)[0]; decision_codes=pd.factorize(decisions,sort=False)[0]
+    years=pd.to_datetime(feature_frame.session_date).dt.year.to_numpy(); rows=[]
     corr=corr.cpu().numpy(); rank_corr=rank_corr.cpu().numpy(); n=n.cpu().numpy(); pair_mean_y=pair_mean_y.cpu().numpy(); vx=vx.cpu().numpy(); vy=vy.cpu().numpy(); cov=cov.cpu().numpy(); cluster_se=cluster_se.cpu().numpy(); cluster_t=cluster_t.cpu().numpy()
     # Aggregate all ten deciles for every target in one scatter operation per
     # feature. This replaces thousands of full-column masks and device syncs.
@@ -60,11 +62,12 @@ def cuda_screen(
         for j,target in enumerate(targets):
             if (spec.name,target) in completed: continue
             count=int(n[i,j])
-            base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"target_family":target.removesuffix("_benchmark_adjusted"),"n":count,"sessions":sessions,"symbols":symbols}
+            valid=np.isfinite(x_np[:,i])&np.isfinite(y_np[:,j]); sessions=int(np.unique(session_codes[valid]).size); symbols=int(np.unique(symbol_codes[valid]).size); decisions=int(np.unique(decision_codes[valid]).size); valid_years=int(np.unique(years[valid]).size)
+            base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"target_family":target.removesuffix("_benchmark_adjusted"),"table_rows":len(feature_frame),"n":count,"valid_observations":count,"sessions":sessions,"valid_sessions":sessions,"symbols":symbols,"valid_symbols":symbols,"valid_decision_timestamps":decisions,"valid_years":valid_years}
             pair_variance=float(vx[i,j]/max(count,1))
             if not np.isfinite(pair_variance) or pair_variance<1e-14:
                 rows.append({**base,"status":"constant_feature"}); continue
-            if count<config.min_observations:
+            if count<config.min_observations or sessions<config.min_sessions or symbols<config.min_symbols or decisions<config.min_decision_timestamps or valid_years<config.min_years:
                 rows.append({**base,"status":"insufficient_data"}); continue
             counts=decile_counts[i][:,j].tolist(); means=decile_means[i][:,j].astype(float)
             means=np.where(np.asarray(counts)>0,means,np.nan)

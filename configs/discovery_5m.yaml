@@ -2,23 +2,40 @@ catalog_path: D:/AlgoResearch/data/catalog.duckdb
 source_table: derived_bars_5m
 feed: sip
 adjustment: raw
-start: "2019-01-01"
+start: "2019-06-21"
+selection_end: "2023-12-31"
+confirmation_start: "2024-01-01"
 discovery_end: "2026-04-30"
 sealed_holdout_start: "2026-05-01"
 allow_holdout_access: false
+membership_table: qqq_pit_membership_daily
+membership_source_quality: effective_date_reconstruction
+require_membership: true
+benchmark_symbols: [QQQ]
+corporate_actions_path: D:/AlgoResearch/Quant Pipeline/reference/corporate_actions_through_20260430.parquet
+require_corporate_actions: true
+exchange_calendar: XNYS
+maximum_missing_bars_per_session: 0
 lookbacks: [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 24, 30, 36, 48, 60, 78]
 quantiles: 10
 min_observations: 500
-min_sessions: 40
-min_symbols: 5
+min_sessions: 100
+min_symbols: 20
+min_decision_timestamps: 100
+min_years: 3
 min_bin_observations: 30
 outlier_policy: none
 output_root: D:/AlgoResearch/Quant Pipeline/runs
 benchmark_symbol: QQQ
-experiment_id: phase1_5m_discovery_through_20260430
+experiment_id: phase1_1_corrected_discovery_through_20260430
 use_cuda: true
 cuda_device: cuda:0
 feature_workers: 16
 exact_workers: 6
 resume: true
 checkpoint_every_pairs: 25
+primary_target_horizons_minutes: [5, 15, 30, 60, 120]
+exact_bootstrap_samples: 500
+primary_fdr_threshold: 0.05
+minimum_effect_bps: 1.0
+cache_schema_version: phase1_1_v1

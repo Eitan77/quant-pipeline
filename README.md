@@ -1,10 +1,10 @@
 # Quant Pipeline
 
-Private, clean-room quantitative feature discovery built around point-in-time
+Clean-room quantitative feature discovery built around point-in-time
 market data. The project does not consume prior strategy findings, backtests,
 or trading results.
 
-## Phase 1
+## Phase 1.1 corrected scanner
 
 Phase 1 builds registered features from completed, session-aligned bars and
 tests them against forward returns that begin strictly after the information
@@ -12,8 +12,9 @@ cutoff. It includes:
 
 - causal feature and target registries;
 - timing, availability, uniqueness, and holdout validation;
-- CUDA-batched Pearson, rank, quantile, and exact session-clustered inference;
-- global Benjamini-Hochberg FDR as the promotion gate;
+- CUDA-batched discovery screening plus two-way clustered, session-bootstrap,
+  HAC-spread, and HAC-IC exact inference;
+- primary-target global, family, cluster, and pair-level FDR;
 - hybrid GPU/CPU exact diagnostics for shortlisted candidates;
 - year, symbol, time, outlier, and cross-sectional IC diagnostics;
 - resumable caches, manifests, coverage ledgers, and reports.
@@ -39,9 +40,13 @@ python -m pytest -q
 Edit the local catalog and output paths in `configs/discovery_5m.yaml`, then:
 
 ```powershell
-quant-pipeline configs/discovery_5m.yaml
+python -m quant_pipeline_launcher configs/discovery_5m.yaml
 ```
 
 CUDA is used when enabled and available; otherwise the correlation backend can
-fall back to CPU. Generated artifacts remain under the configured local output
-directory and are not versioned.
+fall back to CPU. Generated caches remain under the configured local output
+directory. Curated aggregate results can be copied into `results/` after
+review.
+
+See [PHASE1_1_CORRECTION_NOTES.md](PHASE1_1_CORRECTION_NOTES.md) for the
+correction contract, current data-source limitations, and rerun boundary.
