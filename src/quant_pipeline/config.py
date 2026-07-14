@@ -78,6 +78,20 @@ class ScanConfig:
     max_candidates_per_feature_family: int = 20
     max_candidates_per_cluster: int = 3
     max_candidates_per_target_family: int = 30
+    regime_min_observations: int = 500
+    regime_min_sessions: int = 100
+    regime_min_symbols: int = 20
+    exact_time_min_observations: int = 500
+    exact_time_min_sessions: int = 100
+    exact_time_min_symbols: int = 20
+    scope_min_observations: int = 500
+    scope_min_sessions: int = 100
+    scope_min_symbols: int = 3
+    trend_threshold_bps: float = 20.0
+    gap_threshold_bps: float = 20.0
+    market_wide_min_direction_pct: float = 0.60
+    market_wide_max_group_share: float = 0.40
+    specific_scope_min_group_share: float = 0.60
     cache_schema_version: str = "phase1_final"
 
     @classmethod

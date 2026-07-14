@@ -25,7 +25,7 @@ min_decision_timestamps: 100
 min_years: 1
 min_bin_observations: 20
 output_root: D:/AlgoResearch/Quant Pipeline/runs
-experiment_id: phase1_final_smoke_one_month_202402
+experiment_id: phase1_four_fixes_smoke_one_month_202402
 use_cuda: true
 feature_workers: 8
 exact_workers: 4
@@ -35,4 +35,13 @@ exact_bootstrap_samples: 100
 max_candidates_per_feature_family: 5
 max_candidates_per_cluster: 2
 max_candidates_per_target_family: 10
+regime_min_observations: 200
+regime_min_sessions: 10
+regime_min_symbols: 10
+exact_time_min_observations: 100
+exact_time_min_sessions: 10
+exact_time_min_symbols: 10
+scope_min_observations: 200
+scope_min_sessions: 10
+scope_min_symbols: 2
 cache_schema_version: phase1_final

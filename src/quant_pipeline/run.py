@@ -141,6 +141,7 @@ def execute(config: ScanConfig) -> Path:
     else:results["exploratory_family_fdr"]=np.nan
     results["primary_test_count"]=int(primary.raw_p.notna().sum()); results["exploratory_test_count"]=int(exploratory.raw_p.notna().sum()); results.to_csv(root/"master_results.csv",index=False)
     feature_path_by_name={spec.name:feature_paths[index] for index,chunk in enumerate(chunks) for spec in chunk}
+    diagnostic_context_path=_build_diagnostic_context(feature_path_by_name,built_names,config,root)
     queue=_cluster_candidates(primary,feature_path_by_name,config,limit=250)
     top_specs=[s for s in requested if s.name in set(queue.feature)]
     detailed=[]; qtabs={}; spec_by_name={s.name:s for s in top_specs}
@@ -154,7 +155,7 @@ def execute(config: ScanConfig) -> Path:
         futures={}
         for row in queue.itertuples():
             key=(row.feature,row.target); feature_path=feature_path_by_name[row.feature]; target_path=target_path_by_name[row.target]
-            futures[cpu_pool.submit(exact_pair,feature_path,target_path,spec_by_name[row.feature],row.target,config,hints[key])]=("cpu",key)
+            futures[cpu_pool.submit(exact_pair,feature_path,target_path,spec_by_name[row.feature],row.target,config,hints[key],diagnostic_context_path)]=("cpu",key)
             exact_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
             futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,exact_end)]=("gpu",key)
         pending=set(futures)
@@ -168,7 +169,10 @@ def execute(config: ScanConfig) -> Path:
                     dense,table=future.result(); gpu_rows[key]=dense; gpu_done+=1
             status={"stage":"exact_diagnostics_hybrid","cpu_completed":cpu_done,"gpu_completed":gpu_done,"total":len(queue),"cpu_workers":config.exact_workers,"gpu_workers":1,"updated_at":datetime.now(timezone.utc).isoformat()}
             (root/"progress.json").write_text(json.dumps(status,indent=2),encoding="utf-8"); (root/"detailed_progress.json").write_text(json.dumps(status,indent=2),encoding="utf-8")
-    for key,row in cpu_rows.items():
+    # Preserve the already-selected queue order. Worker completion order must
+    # never influence redundancy penalties or the existing ranking formula.
+    for queued_item in queue.itertuples(index=False):
+        key=(queued_item.feature,queued_item.target); row=cpu_rows.get(key)
         if row is None or key not in gpu_rows: continue
         dense=gpu_rows[key]; hint=hints[key]
         if np.sign(dense["spearman"])!=np.sign(hint):
@@ -184,7 +188,9 @@ def execute(config: ScanConfig) -> Path:
         detailed=_classify_detailed_candidates(detailed,config)
         detailed["effect_size_score"]=detailed.top_bottom_spread.abs().rank(pct=True); detailed["global_fdr_score"]=(1-detailed.bh_fdr_p.fillna(1)).clip(0,1); detailed["quantile_shape_score"]=detailed.monotonicity.abs().fillna(0); detailed["session_stability_score"]=detailed.year_consistency.fillna(0); detailed["symbol_breadth_score"]=detailed.symbol_breadth.fillna(0); detailed["outlier_robustness_score"]=(detailed.outlier_worst_signed_spread.fillna(0)>0).astype(float); detailed["historical_stability_score"]=detailed.get("historical_subperiod_positive_fold_pct",pd.Series(0,index=detailed.index)).fillna(0); detailed["recent_relevance_score"]=detailed.get("recent_12m_effect",pd.Series(0,index=detailed.index)).gt(0).astype(float); detailed["redundancy_penalty"]=detailed.groupby("candidate_cluster").cumcount()*.05; detailed["complexity_penalty"]=detailed.feature.str.count("_")*.005
         detailed["anomaly_score"]=.2*detailed.effect_size_score+.2*detailed.global_fdr_score+.1*detailed.quantile_shape_score+.1*detailed.session_stability_score+.1*detailed.symbol_breadth_score+.1*detailed.outlier_robustness_score+.1*detailed.historical_stability_score+.1*detailed.recent_relevance_score-detailed.redundancy_penalty-detailed.complexity_penalty
-        detailed=detailed.sort_values("anomaly_score",ascending=False); detailed.to_csv(root/"detailed_candidates.csv",index=False)
+        detailed=detailed.sort_values("anomaly_score",ascending=False)
+        from .diagnostics import phase2_recommendation
+        recommendations=pd.DataFrame([phase2_recommendation(row) for _,row in detailed.iterrows()],index=detailed.index); detailed=pd.concat([detailed.drop(columns=[c for c in recommendations if c in detailed],errors="ignore"),recommendations],axis=1); detailed.to_csv(root/"detailed_candidates.csv",index=False)
         cluster_report=detailed.groupby("candidate_cluster",dropna=False).agg(pairs=("feature","size"),best_primary_fdr=("bh_fdr_p","min"),best_effect=("top_bottom_spread",lambda s:float(s.loc[s.abs().idxmax()])),robust_phase1=("status",lambda s:int(s.eq("robust_phase1_anomaly_candidate").any()))).reset_index()
         cluster_report.to_csv(root/"cluster_level_anomalies.csv",index=False)
         diagnostic_root=root/"candidate_diagnostics"; diagnostic_root.mkdir(exist_ok=True)
@@ -195,6 +201,7 @@ def execute(config: ScanConfig) -> Path:
                 if not table.empty:
                     assert_pre_holdout_frame(table,config.sealed_holdout_start,f"diagnostic output {name}")
                     table.to_csv(diagnostic_root/f"{stem}__{name}.csv",index=False)
+        _write_aggregate_diagnostics(root,diagnostic_rows,config)
     _write_coverage_reports(root,results,requested,feature_paths,built_by_chunk)
     assert_pre_holdout_frame(pd.read_parquet(bars_cache,columns=["session_date","bar_start_ts","decision_ts"]),config.sealed_holdout_start,"report input")
     write_reports(detailed if not detailed.empty else results.head(50), qtabs, root, None, config=config,run_metadata={"fingerprint":fingerprint_sha,"git_commit":_git_revision()})
@@ -206,6 +213,11 @@ def execute(config: ScanConfig) -> Path:
     manifest["benchmark_source_rows_invalid"]=int(sum(record.get("benchmark_source_rows_invalid",0) for record in validation_records))
     manifest["benchmark_sessions_invalid"]=int(sum(record.get("benchmark_sessions_invalid",0) for record in validation_records))
     manifest["beta_residual_rows_excluded_insufficient_history"]=int(sum(record.get("beta_residual_rows_excluded_insufficient_history",0) for record in validation_records))
+    manifest["descriptive_diagnostics_only"]=True
+    manifest["regime_diagnostic_candidates"]=int(detailed.regime_summary_label.notna().sum()) if "regime_summary_label" in detailed else 0
+    manifest["scope_diagnostic_candidates"]=int(detailed.scope_classification.notna().sum()) if "scope_classification" in detailed else 0
+    manifest["exact_time_diagnostic_candidates"]=int(detailed.time_concentration_label.notna().sum()) if "time_concentration_label" in detailed else 0
+    manifest["phase2_recommendation_candidates"]=int(detailed.phase2_recommendation.notna().sum()) if "phase2_recommendation" in detailed else 0
     (root/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
     (root/"progress.json").write_text(json.dumps({"stage":"complete","screened_pairs":len(results),"exact_candidates":len(detailed),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
     return root
@@ -233,7 +245,7 @@ def _classify_detailed_candidates(detailed,config:ScanConfig|None=None):
     result.loc[usable&global_fdr&exact&coverage&economic&recent&~stable,"status"]="recently_relevant_anomaly_candidate"
     robust=usable&global_fdr&exact&coverage&economic&stable&shape&outlier&breadth
     result.loc[robust,"status"]="robust_phase1_anomaly_candidate"
-    result.loc[usable&global_fdr&exact&coverage&economic&~robust&result.get("phase2_recommendation",pd.Series("",index=result.index)).str.startswith("advance"),"status"]="requires_phase2_testing"
+    result.loc[usable&global_fdr&exact&coverage&economic&~robust&result.get("phase2_recommendation_seed",pd.Series("",index=result.index)).str.startswith("advance"),"status"]="requires_phase2_testing"
     result["phase2_required"]=result.status.isin(["robust_phase1_anomaly_candidate","requires_phase2_testing"])
     return result
 
@@ -329,6 +341,43 @@ def _write_coverage_reports(root,results,requested,feature_paths,built_by_chunk)
             rows.append({"feature name":spec.name,"feature family":spec.family,"built status":"built","availability start":str(first) if first is not None else None,"missing rate":float(values.isna().mean()),"infinite count":int(np.isinf(values).sum()),"minimum":float(finite.min()) if len(finite) else np.nan,"maximum":float(finite.max()) if len(finite) else np.nan,"median":float(finite.median()) if len(finite) else np.nan,"99th percentile":float(finite.quantile(.99)) if len(finite) else np.nan,"corporate-action alerts":0})
     rows.extend({"feature name":spec.name,"feature family":spec.family,"built status":"skipped","availability start":None,"missing rate":1.0,"infinite count":0,"minimum":np.nan,"maximum":np.nan,"median":np.nan,"99th percentile":np.nan,"corporate-action alerts":np.nan} for spec in requested if spec.name not in built)
     pd.DataFrame(rows).to_csv(root/"feature_build_report.csv",index=False)
+
+
+def _build_diagnostic_context(feature_paths:dict[str,Path],built_names:set[str],config:ScanConfig,root:Path)->Path|None:
+    """Join already-built causal context features; never rebuild or rescan."""
+    context_features={
+        "high_market_vol":"high_market_vol",
+        "universe_breadth_positive":"universe_breadth_positive",
+        "universe_return_dispersion":"universe_return_dispersion",
+        "return_since_open":"benchmark_return_since_open",
+        "distance_session_vwap":"benchmark_distance_session_vwap",
+        "overnight_gap":"benchmark_overnight_gap",
+    }
+    pieces=[]
+    for feature,output in context_features.items():
+        if feature not in built_names or feature not in feature_paths:continue
+        path=feature_paths[feature]; columns=["decision_ts",feature]
+        import pyarrow.parquet as pq
+        schema=set(pq.ParquetFile(path).schema.names)
+        if feature in {"return_since_open","distance_session_vwap","overnight_gap"}:columns += [c for c in ["symbol","benchmark_valid"] if c in schema]
+        else:columns += [c for c in ["analysis_eligible"] if c in schema]
+        frame=pd.read_parquet(path,columns=columns)
+        if feature in {"return_since_open","distance_session_vwap","overnight_gap"}:
+            mask=frame.symbol.eq(config.benchmark_symbol) if "symbol" in frame else pd.Series(False,index=frame.index)
+            if "benchmark_valid" in frame:mask&=frame.benchmark_valid.fillna(False)
+            frame=frame.loc[mask]
+        elif "analysis_eligible" in frame:frame=frame.loc[frame.analysis_eligible.fillna(False)]
+        series=frame.dropna(subset=[feature]).drop_duplicates("decision_ts").set_index("decision_ts")[feature].rename(output); pieces.append(series)
+    if not pieces:return None
+    context=pd.concat(pieces,axis=1).reset_index().sort_values("decision_ts"); assert_pre_holdout_frame(context,config.sealed_holdout_start,"diagnostic context build")
+    path=root/"diagnostic_context.parquet"; context.to_parquet(path,index=False); return path
+
+
+def _write_aggregate_diagnostics(root:Path,diagnostic_rows:dict,config:ScanConfig)->None:
+    outputs={"regime":"candidate_regime_diagnostics.csv","sector":"candidate_sector_diagnostics.csv","industry":"candidate_industry_diagnostics.csv","scope":"candidate_scope_classification.csv","exact_time":"effect_by_exact_decision_time.csv"}
+    for key,filename in outputs.items():
+        records=[record for tables in diagnostic_rows.values() for record in tables.get(key,[])]
+        table=pd.DataFrame(records); assert_pre_holdout_frame(table,config.sealed_holdout_start,f"aggregate diagnostic {key}"); table.to_csv(root/filename,index=False)
 
 
 def _git_revision() -> str | None:

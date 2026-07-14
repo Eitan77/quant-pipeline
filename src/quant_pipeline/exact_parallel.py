@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .config import ScanConfig
-from .diagnostics import recent_period_diagnostics,recency_weighted_diagnostics,symbol_and_concentration_diagnostics
+from .diagnostics import exact_time_diagnostics,recent_period_diagnostics,recency_weighted_diagnostics,regime_diagnostics,scope_diagnostics,symbol_and_concentration_diagnostics
 from .holdout import assert_pre_holdout_frame
 from .registry import FeatureSpec
 from .scanner import scan
@@ -20,6 +20,7 @@ def exact_pair(
     target: str,
     config: ScanConfig,
     direction_hint: float | None = None,
+    diagnostic_context_path: Path | None = None,
 ) -> tuple[dict | None, list[dict], dict[str,list[dict]]]:
     import pyarrow.parquet as pq
     identifiers=["symbol","session_date","bar_start_ts","decision_ts","analysis_eligible"]
@@ -32,6 +33,10 @@ def exact_pair(
     frame=feature_frame.merge(target_frame,on=["symbol","session_date","bar_start_ts","decision_ts"],how="inner",validate="one_to_one")
     if len(frame)!=len(feature_frame):raise ValueError("Feature-target cache key mismatch")
     if raw in frame and adjusted in frame:frame["market_context_return"]=frame[raw]-frame[adjusted]
+    if diagnostic_context_path is not None and diagnostic_context_path.exists():
+        context=pd.read_parquet(diagnostic_context_path); assert_pre_holdout_frame(context,config.sealed_holdout_start,"diagnostic context")
+        context=context[["decision_ts",*[column for column in context.columns if column!="decision_ts" and column not in frame]]]
+        frame=frame.merge(context,on="decision_ts",how="left",validate="many_to_one")
     assert_pre_holdout_frame(frame,config.sealed_holdout_start,"exact pair")
     eligible=frame.analysis_eligible.fillna(False)
     dates=pd.to_datetime(frame.session_date); full=frame.loc[eligible&dates.le(pd.Timestamp(config.discovery_end))]
@@ -59,6 +64,9 @@ def exact_pair(
         if config.run_recency_weighted_diagnostics:
             summary,table=recency_weighted_diagnostics(full,spec.name,target,direction,config); row.update(summary); diagnostic_tables["recency_weighted"]=table.to_dict("records")
         summary,diagnostics=symbol_and_concentration_diagnostics(full,spec.name,target,direction,config); row.update(summary); diagnostic_tables.update({name:table.to_dict("records") for name,table in diagnostics.items()})
+        summary,table=regime_diagnostics(full,spec.name,target,direction,config); row.update(summary); diagnostic_tables["regime"]=table.to_dict("records")
+        summary,tables=scope_diagnostics(full,spec.name,target,direction,row.get("symbol_breadth_classification","insufficient_evidence"),config); row.update(summary); diagnostic_tables.update({name:table.to_dict("records") for name,table in tables.items()})
+        summary,table=exact_time_diagnostics(full,spec.name,target,direction,config); row.update(summary); diagnostic_tables["exact_time"]=table.to_dict("records")
     table=tables.get((spec.name,target),pd.DataFrame()).to_dict("records")
     return row,table,diagnostic_tables
 
