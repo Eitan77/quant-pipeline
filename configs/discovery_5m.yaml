@@ -1,0 +1,24 @@
+catalog_path: D:/AlgoResearch/data/catalog.duckdb
+source_table: derived_bars_5m
+feed: sip
+adjustment: raw
+start: "2019-01-01"
+discovery_end: "2026-04-30"
+sealed_holdout_start: "2026-05-01"
+allow_holdout_access: false
+lookbacks: [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 24, 30, 36, 48, 60, 78]
+quantiles: 10
+min_observations: 500
+min_sessions: 40
+min_symbols: 5
+min_bin_observations: 30
+outlier_policy: none
+output_root: D:/AlgoResearch/Quant Pipeline/runs
+benchmark_symbol: QQQ
+experiment_id: phase1_5m_discovery_through_20260430
+use_cuda: true
+cuda_device: cuda:0
+feature_workers: 16
+exact_workers: 6
+resume: true
+checkpoint_every_pairs: 25
