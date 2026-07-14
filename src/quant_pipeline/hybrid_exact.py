@@ -11,7 +11,7 @@ def gpu_dense_pair(feature_path: Path, target_path: Path, feature: str, target: 
     """Exact dense pair statistics on CUDA; grouped diagnostics stay on CPU."""
     import torch
 
-    ff=pd.read_parquet(feature_path,columns=["session_date","scan_eligible","session_grid_eligible",feature]); mask=pd.to_datetime(ff.session_date).le(pd.Timestamp(selection_end))&ff.scan_eligible.fillna(False)&ff.session_grid_eligible.fillna(False)
+    ff=pd.read_parquet(feature_path,columns=["session_date","analysis_eligible",feature]); mask=pd.to_datetime(ff.session_date).le(pd.Timestamp(selection_end))&ff.analysis_eligible.fillna(False)
     x=ff.loc[mask,feature].to_numpy(dtype=np.float32,copy=False)
     y=pd.read_parquet(target_path,columns=[target]).loc[mask,target].to_numpy(dtype=np.float32,copy=False)
     valid=np.isfinite(x)&np.isfinite(y); x=x[valid]; y=y[valid]

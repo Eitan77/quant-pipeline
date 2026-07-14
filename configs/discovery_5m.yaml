@@ -27,7 +27,7 @@ min_bin_observations: 30
 outlier_policy: none
 output_root: D:/AlgoResearch/Quant Pipeline/runs
 benchmark_symbol: QQQ
-experiment_id: phase1_1_corrected_discovery_through_20260430
+experiment_id: phase1_3_final_corrected_through_20260430
 use_cuda: true
 cuda_device: cuda:0
 feature_workers: 16
@@ -38,4 +38,16 @@ primary_target_horizons_minutes: [5, 15, 30, 60, 120]
 exact_bootstrap_samples: 500
 primary_fdr_threshold: 0.05
 minimum_effect_bps: 1.0
-cache_schema_version: phase1_1_v1
+confirmation_min_sessions: 100
+confirmation_min_symbols: 20
+confirmation_min_effect_bps: 1.0
+confirmation_min_discovery_ratio: 0.25
+confirmation_max_discovery_ratio: 4.0
+confirmation_alpha: 0.10
+confirmation_min_positive_fold_fraction: 0.60
+beta_window_sessions: 60
+beta_min_observations: 40
+max_candidates_per_feature_family: 20
+max_candidates_per_cluster: 3
+max_candidates_per_target_family: 30
+cache_schema_version: phase1_3

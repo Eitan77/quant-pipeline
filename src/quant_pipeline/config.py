@@ -41,7 +41,7 @@ class ScanConfig:
     min_bin_observations: int = 30
     outlier_policy: str = "none"  # none|winsorize_1pct
     output_root: str = "D:/AlgoResearch/Quant Pipeline/runs"
-    experiment_id: str = "phase1_1_corrected_discovery_through_20260430"
+    experiment_id: str = "phase1_3_final_corrected_through_20260430"
     benchmark_symbol: str = "QQQ"
     sector_map_path: str | None = None
     use_cuda: bool = True
@@ -61,7 +61,19 @@ class ScanConfig:
     exact_bootstrap_samples: int = 500
     primary_fdr_threshold: float = 0.05
     minimum_effect_bps: float = 1.0
-    cache_schema_version: str = "phase1_1_v1"
+    confirmation_min_sessions: int = 100
+    confirmation_min_symbols: int = 20
+    confirmation_min_effect_bps: float = 1.0
+    confirmation_min_discovery_ratio: float = 0.25
+    confirmation_max_discovery_ratio: float = 4.0
+    confirmation_alpha: float = 0.10
+    confirmation_min_positive_fold_fraction: float = 0.60
+    beta_window_sessions: int = 60
+    beta_min_observations: int = 40
+    max_candidates_per_feature_family: int = 20
+    max_candidates_per_cluster: int = 3
+    max_candidates_per_target_family: int = 30
+    cache_schema_version: str = "phase1_3"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ScanConfig":

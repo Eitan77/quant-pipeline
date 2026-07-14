@@ -4,7 +4,7 @@ Clean-room quantitative feature discovery built around point-in-time
 market data. The project does not consume prior strategy findings, backtests,
 or trading results.
 
-## Phase 1.1 corrected scanner
+## Phase 1.3 final corrected scanner
 
 Phase 1 builds registered features from completed, session-aligned bars and
 tests them against forward returns that begin strictly after the information
@@ -48,5 +48,5 @@ fall back to CPU. Generated caches remain under the configured local output
 directory. Curated aggregate results can be copied into `results/` after
 review.
 
-See [PHASE1_1_CORRECTION_NOTES.md](PHASE1_1_CORRECTION_NOTES.md) for the
-correction contract, current data-source limitations, and rerun boundary.
+See [PHASE1_3_FINAL_REPAIR_NOTES.md](PHASE1_3_FINAL_REPAIR_NOTES.md) for the
+final repair contract, current data-source limitations, and rerun boundary.

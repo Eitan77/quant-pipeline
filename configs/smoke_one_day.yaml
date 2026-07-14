@@ -1,0 +1,32 @@
+catalog_path: D:/AlgoResearch/data/catalog.duckdb
+source_table: derived_bars_5m
+feed: sip
+adjustment: raw
+start: "2023-12-29"
+selection_end: "2023-12-29"
+confirmation_start: "2024-01-01"
+discovery_end: "2023-12-29"
+sealed_holdout_start: "2026-05-01"
+membership_table: qqq_pit_membership_daily
+require_membership: true
+corporate_actions_path: D:/AlgoResearch/Quant Pipeline/reference/corporate_actions_through_20260430.parquet
+require_corporate_actions: true
+lookbacks: [1, 3, 5]
+target_horizons_minutes: [5, 15, 30]
+primary_target_horizons_minutes: [5, 15, 30]
+opening_windows_minutes: [5, 15]
+min_observations: 50
+min_sessions: 1
+min_symbols: 5
+min_decision_timestamps: 5
+min_years: 1
+min_bin_observations: 5
+output_root: D:/AlgoResearch/Quant Pipeline/runs
+experiment_id: phase1_3_smoke_one_day_20231229
+use_cuda: true
+feature_workers: 4
+exact_workers: 2
+feature_chunk_size: 24
+target_chunk_size: 3
+exact_bootstrap_samples: 50
+cache_schema_version: phase1_3

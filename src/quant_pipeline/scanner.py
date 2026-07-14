@@ -34,12 +34,30 @@ def _cluster_scores(x: np.ndarray, residual: np.ndarray, clusters: np.ndarray) -
 
 
 def _two_way_clustered_slope(x: np.ndarray,y: np.ndarray,dates: np.ndarray,symbols: np.ndarray) -> tuple[float,float,float]:
-    X=np.column_stack((np.ones(len(x)),x)); bread=np.linalg.pinv(X.T@X); beta=bread@(X.T@y); residual=y-X@beta
-    date_scores=_cluster_scores(x,residual,dates); symbol_scores=_cluster_scores(x,residual,symbols)
-    observation_scores=X*residual[:,None]
-    meat=date_scores.T@date_scores+symbol_scores.T@symbol_scores-observation_scores.T@observation_scores
-    variance=bread@meat@bread; se=float(np.sqrt(max(variance[1,1],0))); t=float(beta[1]/se) if se else np.nan
+    X=np.column_stack((np.ones(len(x)),x)); beta=np.linalg.pinv(X.T@X)@(X.T@y); variance=_two_way_clustered_covariance(X,y-X@beta,dates,symbols)
+    se=float(np.sqrt(max(variance[1,1],0))); t=float(beta[1]/se) if se else np.nan
     return se,t,_normal_pvalue(t) if np.isfinite(t) else np.nan
+
+
+def _cluster_covariance(X:np.ndarray,residual:np.ndarray,clusters:np.ndarray)->np.ndarray:
+    bread=np.linalg.pinv(X.T@X); codes,_=pd.factorize(clusters,sort=False); scores=np.zeros((codes.max()+1,X.shape[1])); np.add.at(scores,codes,X*residual[:,None]); groups=len(scores); n=len(X); k=X.shape[1]
+    correction=(groups/(groups-1))*((n-1)/(n-k)) if groups>1 and n>k else 1.0
+    return correction*bread@(scores.T@scores)@bread
+
+
+def _two_way_clustered_covariance(X:np.ndarray,residual:np.ndarray,dates:np.ndarray,symbols:np.ndarray)->np.ndarray:
+    intersection=np.char.add(np.char.add(symbols.astype(str),"|"),dates.astype(str))
+    return _cluster_covariance(X,residual,dates)+_cluster_covariance(X,residual,symbols)-_cluster_covariance(X,residual,intersection)
+
+
+def _categorical_clustered_test(sub:pd.DataFrame,feature:str,target:str)->dict:
+    design=pd.get_dummies(sub[feature],prefix=feature,drop_first=True,dtype=float)
+    if design.shape[1]==0:return {"raw_p":np.nan,"two_way_cluster_p":np.nan,"category_count":sub[feature].nunique()}
+    X=np.column_stack([np.ones(len(sub)),design.to_numpy()]); y=sub[target].to_numpy(float); beta=np.linalg.pinv(X.T@X)@(X.T@y); residual=y-X@beta
+    date_cov=_cluster_covariance(X,residual,sub.session_date.astype(str).to_numpy()); two_cov=_two_way_clustered_covariance(X,residual,sub.session_date.astype(str).to_numpy(),sub.symbol.astype(str).to_numpy())
+    def wald(cov):
+        b=beta[1:]; v=cov[1:,1:]; statistic=float(b@np.linalg.pinv(v)@b); return float(stats.chi2.sf(statistic,len(b)))
+    return {"raw_p":wald(date_cov),"two_way_cluster_p":wald(two_cov),"category_count":sub[feature].nunique()}
 
 
 def _hac_mean(series: pd.Series,max_lag: int|None=None) -> tuple[float,float,float]:
@@ -61,8 +79,8 @@ def _quantiles(x: pd.Series, y: pd.Series, sessions: pd.Series, q: int, min_bin:
     daily=work.groupby(["session","bin"],observed=True).target.mean().unstack("bin")
     session_stats=[]
     for b in tab.bin:
-        mean,se,t=_hac_mean(daily.get(b,pd.Series(dtype=float))); session_stats.append((se,mean-1.96*se if np.isfinite(se) else np.nan,mean+1.96*se if np.isfinite(se) else np.nan))
-    tab[["se","ci_low","ci_high"]]=pd.DataFrame(session_stats,index=tab.index)
+        mean,se,t=_hac_mean(daily.get(b,pd.Series(dtype=float))); session_stats.append((mean,se,mean-1.96*se if np.isfinite(se) else np.nan,mean+1.96*se if np.isfinite(se) else np.nan))
+    tab[["equal_session_mean","se","ci_low","ci_high"]]=pd.DataFrame(session_stats,index=tab.index)
     if len(tab)<3 or tab["count"].min()<min_bin: return {"top_bottom_spread":np.nan,"monotonicity":np.nan,"shape":"insufficient"},tab
     rho=float(stats.spearmanr(tab.bin,tab["mean"]).statistic); spread=float(tab["mean"].iloc[-1]-tab["mean"].iloc[0]); diffs=np.diff(tab["mean"])
     if abs(rho)>=.7: shape="positive_monotonic" if rho>0 else "negative_monotonic"
@@ -89,35 +107,35 @@ def _cross_sectional_ic(frame: pd.DataFrame, feature: str, target: str,min_symbo
     cov=agg.sxy-agg.sx*agg.sy/agg.n; vx=agg.sxx-agg.sx*agg.sx/agg.n; vy=agg.syy-agg.sy*agg.sy/agg.n
     ic=(cov/np.sqrt(vx*vy)).where(agg.n.ge(min_symbols)).replace([np.inf,-np.inf],np.nan).dropna()
     if len(ic)<2:return {"ic_mean":np.nan,"ic_median":np.nan,"ic_std":np.nan,"ic_t":np.nan,"ic_positive_pct":np.nan}
-    daily=ic.groupby(pd.to_datetime(ic.index,utc=True).date).mean(); mean,se,t=_hac_mean(daily)
+    daily=ic.groupby(pd.to_datetime(ic.index,utc=True).date).mean(); mean,se,t=_hac_mean(daily); p=float(2*stats.norm.sf(abs(t))) if np.isfinite(t) else np.nan
     index=pd.to_datetime(ic.index,utc=True); by_year=ic.groupby(index.year).mean().to_dict(); local=index.tz_convert("America/New_York"); by_time=ic.groupby(local.strftime("%H:%M")).mean().to_dict()
-    return {"ic_mean":float(ic.mean()),"ic_median":float(ic.median()),"ic_std":float(ic.std(ddof=1)),"ic_information_ratio":float(ic.mean()/ic.std(ddof=1)) if ic.std(ddof=1) else np.nan,"ic_hac_se":se,"ic_hac_t":t,"ic_positive_pct":float((ic>0).mean()),"ic_timestamps":len(ic),"ic_days":len(daily),"ic_by_year":json.dumps(by_year,sort_keys=True),"ic_by_time_of_day":json.dumps(by_time,sort_keys=True)}
+    return {"ic_mean":float(ic.mean()),"ic_median":float(ic.median()),"ic_std":float(ic.std(ddof=1)),"ic_information_ratio":float(ic.mean()/ic.std(ddof=1)) if ic.std(ddof=1) else np.nan,"ic_hac_se":se,"ic_hac_t":t,"ic_hac_p":p,"ic_positive_pct":float((ic>0).mean()),"ic_positive_day_pct":float((daily>0).mean()),"ic_timestamps":len(ic),"ic_days":len(daily),"ic_by_year":json.dumps(by_year,sort_keys=True),"ic_by_time_of_day":json.dumps(by_time,sort_keys=True)}
 
 
 def _outlier_diagnostics(sub:pd.DataFrame,feature:str,target:str,direction:float) -> dict:
+    sign=1 if direction>=0 else -1
     def metrics(z):
-        if len(z)<10:return (np.nan,np.nan)
+        if len(z)<10:return (np.nan,np.nan,np.nan,np.nan,np.nan)
         rho=float(z[feature].corr(z[target],method="spearman")); bins=pd.qcut(z[feature].rank(method="first"),10,labels=False,duplicates="drop"); means=z.groupby(bins,observed=True)[target].mean(); spread=float(means.iloc[-1]-means.iloc[0]) if len(means)>1 else np.nan
-        return rho,spread
-    base_rho,base_spread=metrics(sub); results={}
+        _,_,cluster_t,_=_clustered_slope(z[feature].to_numpy(float),z[target].to_numpy(float),z.session_date.astype(str).to_numpy()); daily=z.assign(_bin=bins).groupby(["session_date","_bin"],observed=True)[target].mean().unstack(); daily_spread=(daily.iloc[:,-1]-daily.iloc[:,0])*sign if daily.shape[1]>1 else pd.Series(dtype=float); _,se,_=_hac_mean(daily_spread); signed=spread*sign
+        return rho*sign,signed,cluster_t*sign,signed-1.96*se if np.isfinite(se) else np.nan,signed+1.96*se if np.isfinite(se) else np.nan
+    _,base_signed,_,_,_=metrics(sub); results={}
+    bounds=lambda q:(sub[target].quantile(q),sub[target].quantile(1-q))
     variants={
         "feature_winsor":sub.assign(**{feature:sub[feature].clip(sub[feature].quantile(.01),sub[feature].quantile(.99))}),
         "target_winsor":sub.assign(**{target:sub[target].clip(sub[target].quantile(.01),sub[target].quantile(.99))}),
-        "remove_target_001":sub.loc[sub[target].abs().le(sub[target].abs().quantile(.999))],
-        "remove_target_005":sub.loc[sub[target].abs().le(sub[target].abs().quantile(.995))],
-        "remove_target_01":sub.loc[sub[target].abs().le(sub[target].abs().quantile(.99))],
+        "remove_target_001":sub.loc[sub[target].between(*bounds(.001))],"remove_target_005":sub.loc[sub[target].between(*bounds(.005))],"remove_target_01":sub.loc[sub[target].between(*bounds(.01))],
     }
     variants["both_winsor"]=variants["feature_winsor"].assign(**{target:sub[target].clip(sub[target].quantile(.01),sub[target].quantile(.99))})
-    day_mean=sub.groupby("session_date")[target].mean().sort_values(ascending=False)
-    symbol_mean=sub.groupby("symbol")[target].mean().sort_values(ascending=False)
-    variants["remove_best_day"]=sub.loc[~sub.session_date.isin(day_mean.head(1).index)]; variants["remove_best_five_days"]=sub.loc[~sub.session_date.isin(day_mean.head(5).index)]
-    variants["remove_best_symbol"]=sub.loc[~sub.symbol.isin(symbol_mean.head(1).index)]; variants["remove_top_ten_observations"]=sub.drop(sub[target].nlargest(min(10,len(sub))).index)
+    day_effect=sub.groupby("session_date").apply(lambda z:_signed_decile_spread(z,feature,target)*sign,include_groups=False).sort_values(ascending=False); symbol_effect=sub.groupby("symbol").apply(lambda z:_signed_decile_spread(z,feature,target)*sign,include_groups=False).sort_values(ascending=False)
+    variants["remove_best_day"]=sub.loc[~sub.session_date.isin(day_effect.head(1).index)]; variants["remove_best_five_days"]=sub.loc[~sub.session_date.isin(day_effect.head(5).index)]; variants["remove_best_symbol"]=sub.loc[~sub.symbol.isin(symbol_effect.head(1).index)]
+    contribution=(sub[target]*sign).abs(); variants["remove_top_ten_observations"]=sub.drop(contribution.nlargest(min(10,len(sub))).index)
     signed=[]
     for name,z in variants.items():
-        rho,spread=metrics(z); results[f"sensitivity_{name}_spearman"]=rho; results[f"sensitivity_{name}_spread"]=spread
-        if np.isfinite(spread):signed.append(spread*np.sign(direction))
+        rho,spread,t,low,high=metrics(z); results[f"sensitivity_{name}_signed_spearman"]=rho; results[f"sensitivity_{name}_signed_spread"]=spread; results[f"sensitivity_{name}_clustered_t"]=t; results[f"sensitivity_{name}_ci_low"]=low; results[f"sensitivity_{name}_ci_high"]=high
+        if np.isfinite(spread):signed.append(spread)
     results["outlier_worst_signed_spread"]=min(signed) if signed else np.nan
-    results["outlier_sensitivity"]=max([abs(base_spread-v) for v in signed if np.isfinite(base_spread)] or [np.nan])
+    results["outlier_sensitivity"]=max([abs(base_signed-v) for v in signed if np.isfinite(base_signed)] or [np.nan])
     return results
 
 
@@ -141,15 +159,17 @@ def scan(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], c
     for spec in features:
         for target in targets:
             if (spec.name,target) in completed: continue
-            sub=frame[["session_date","symbol","decision_ts",spec.name,target]].replace([np.inf,-np.inf],np.nan).dropna()
-            base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"table_rows":len(frame),"n":len(sub),"valid_observations":len(sub),"sessions":sub.session_date.nunique(),"valid_sessions":sub.session_date.nunique(),"symbols":sub.symbol.nunique(),"valid_symbols":sub.symbol.nunique(),"valid_decision_timestamps":sub.decision_ts.nunique(),"valid_years":pd.to_datetime(sub.session_date).dt.year.nunique(),"raw_p":np.nan}
+            eligible=frame.analysis_eligible.fillna(False) if "analysis_eligible" in frame else pd.Series(True,index=frame.index)
+            columns=["session_date","symbol","decision_ts",spec.name,target]+(["sector"] if "sector" in frame else [])
+            sub=frame.loc[eligible,columns].replace([np.inf,-np.inf],np.nan).dropna(subset=[spec.name,target])
+            base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"table_rows":len(frame),"n":len(sub),"valid_observations":len(sub),"sessions":sub.session_date.nunique(),"valid_sessions":sub.session_date.nunique(),"symbols":sub.symbol.nunique(),"valid_symbols":sub.symbol.nunique(),"valid_decision_timestamps":sub.decision_ts.nunique(),"valid_years":pd.to_datetime(sub.session_date).dt.year.nunique(),"valid_sectors":sub.sector.nunique() if "sector" in sub else 0,"raw_p":np.nan}
             if len(sub)<config.min_observations or base["sessions"]<config.min_sessions or base["symbols"]<config.min_symbols or base["valid_decision_timestamps"]<config.min_decision_timestamps or base["valid_years"]<config.min_years:
                 rows.append({**base,"status":"insufficient_data"});continue
             x=sub[spec.name].astype(float);y=sub[target].astype(float)
             if spec.classification=="categorical" or spec.dtype=="categorical":
                 categories=sub.groupby(spec.name)[target].agg(["count","mean","median"]); groups=[z[target].to_numpy() for _,z in sub.groupby(spec.name) if len(z)>=config.min_bin_observations]
-                omnibus_p=float(stats.kruskal(*groups).pvalue) if len(groups)>=2 else np.nan
-                rows.append({**base,"raw_p":omnibus_p,"category_count":len(categories),"category_max_minus_min":float(categories["mean"].max()-categories["mean"].min()),"status":"categorical_screened"})
+                clustered=_categorical_clustered_test(sub,spec.name,target)
+                rows.append({**base,**clustered,"category_max_minus_min":float(categories["mean"].max()-categories["mean"].min()),"status":"categorical_screened"})
                 quantile_tables[(spec.name,target)]=categories.reset_index().rename(columns={spec.name:"category"})
                 continue
             slope,se,t,p=_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy())

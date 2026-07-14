@@ -35,7 +35,8 @@ def test_full_core_registry_builds_and_accounts_for_skips():
     assert all(("_1m" in name or "_3m" in name or name.startswith("sector") or name=="stock_minus_sector_return") for name in skipped)
     frame=add_targets(frame,target_registry(),"QQQ")
     assert validate_point_in_time(frame,target_registry())["target_timing_violations"]==0
-    assert frame.filter(like="benchmark_adjusted").shape[1]==len(target_registry())//2
+    assert frame.filter(like="benchmark_adjusted").shape[1]==sum(t.classification=="benchmark_adjusted" for t in target_registry())
+    assert frame.filter(like="beta_residual").shape[1]==sum(t.classification=="beta_residual" for t in target_registry())
 
 
 def test_signed_features_do_not_register_unstable_mean_ratios():

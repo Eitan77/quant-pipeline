@@ -18,16 +18,19 @@ def write_reports(results: pd.DataFrame, quantiles: dict[tuple[str, str], pd.Dat
         if table.empty:
             continue
         fig, ax = plt.subplots(figsize=(6, 3.5))
-        yerr=[table["mean"]-table.ci_low,table.ci_high-table["mean"]]
-        ax.errorbar(table.bin, table["mean"], yerr=yerr, fmt="o-")
+        x=table["bin"] if "bin" in table else table["category"]
+        if {"ci_low","ci_high"}.issubset(table):
+            yerr=[table["mean"]-table.ci_low,table.ci_high-table["mean"]]; ax.errorbar(x,table["mean"],yerr=yerr,fmt="o-")
+        else:ax.plot(x,table["mean"],"o-")
         ax.axhline(0, color="black", linewidth=.8)
         ax.set(title=f"{feature} -> {target}", xlabel="Feature quantile", ylabel="Mean forward return")
         fig.tight_layout(); fig.savefig(charts / f"{feature}__{target}.png", dpi=140); plt.close(fig)
     master=pd.read_csv(root/"master_results.csv") if (root/"master_results.csv").exists() else pd.DataFrame()
     feature_registry=pd.read_csv(root/"feature_registry.csv") if (root/"feature_registry.csv").exists() else pd.DataFrame()
     target_registry=pd.read_csv(root/"target_registry.csv") if (root/"target_registry.csv").exists() else pd.DataFrame()
-    clusters=results.candidate_cluster.nunique() if "candidate_cluster" in results else 0; confirmed=int(results.status.eq("confirmed_anomaly_candidate").sum()) if "status" in results else 0
-    text = ["# Phase 1.1 corrected anomaly scan", "", "Statistical relationships only; no result is a trading strategy candidate until later execution work.", "", "## Run accounting", "", f"- Features requested: {len(feature_registry)}",f"- Features successfully built: {len(set(master.feature)) if not master.empty else 0}",f"- Targets requested: {len(target_registry)}",f"- Broad-screen feature-target pairs: {len(master)}",f"- Pairs passing minimum coverage: {int(master.raw_p.notna().sum()) if not master.empty else 0}",f"- Globally FDR-significant primary pairs: {int(master.get('primary_global_fdr',pd.Series(dtype=float)).lt(.05).sum()) if not master.empty else 0}",f"- Exact diagnostic candidates: {len(results)}",f"- Redundancy clusters: {clusters}",f"- Internally confirmed anomalies: {confirmed}"]
+    clusters=results.candidate_cluster.nunique() if "candidate_cluster" in results else 0
+    status=results.get("confirmation_status",pd.Series(dtype=str)); directional=int(status.isin(["directionally_replicated","economically_replicated","statistically_confirmed","fully_confirmed_phase1"]).sum()); economic=int(status.isin(["economically_replicated","statistically_confirmed","fully_confirmed_phase1"]).sum()); statistical=int(status.isin(["statistically_confirmed","fully_confirmed_phase1"]).sum()); confirmed=int(status.eq("fully_confirmed_phase1").sum())
+    text = ["# Phase 1.3 final corrected anomaly scan", "", "Statistical relationships only; no result is a trading strategy candidate until later execution work.", "", "## Run accounting", "", f"- Features requested: {len(feature_registry)}",f"- Features successfully built: {len(set(master.feature)) if not master.empty else 0}",f"- Targets requested: {len(target_registry)}",f"- Broad-screen feature-target pairs: {len(master)}",f"- Pairs passing coverage: {int(master.raw_p.notna().sum()) if not master.empty else 0}",f"- Globally FDR-significant pairs: {int(master.get('primary_global_fdr',pd.Series(dtype=float)).lt(.05).sum()) if not master.empty else 0}",f"- Redundancy clusters: {clusters}",f"- Exact diagnostic candidates: {len(results)}",f"- Directionally replicated candidates: {directional}",f"- Economically replicated candidates: {economic}",f"- Statistically confirmed candidates: {statistical}",f"- Fully confirmed Phase 1 anomalies: {confirmed}"]
     if not results.empty:
         columns=[c for c in ["feature","target","pearson","top_bottom_spread","raw_p","bh_fdr_p","year_consistency","symbol_breadth","status"] if c in candidates]
         markdown=["| "+" | ".join(columns)+" |","| "+" | ".join(["---"]*len(columns))+" |"]

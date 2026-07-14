@@ -5,6 +5,7 @@ import pandas as pd
 
 from .config import ScanConfig
 from .registry import FeatureSpec
+from .table import apply_analysis_eligibility,benchmark_valid_mask
 
 
 def build_features(
@@ -26,9 +27,11 @@ def build_features(
     if "scheduled_open" not in x:x["scheduled_open"]=x.groupby(["symbol","session_date"]).bar_start_ts.transform("min")
     if "scheduled_close" not in x:x["scheduled_close"]=x.groupby(["symbol","session_date"]).bar_end_ts.transform("max")
     if "session_length_minutes" not in x:x["session_length_minutes"]=(x.scheduled_close-x.scheduled_open).dt.total_seconds()/60
-    defaults={"symbol_role":"tradable","pit_member":True,"scan_eligible":True,"session_grid_eligible":True,"shortened_session":False,"bar_gap":False,"membership_source_quality":"synthetic_or_prevalidated","split_factor":1.0}
+    if "symbol_role" not in x:x["symbol_role"]=np.where(x.symbol.eq(config.benchmark_symbol),"benchmark","tradable")
+    defaults={"pit_member":True,"scan_eligible":True,"session_grid_eligible":True,"shortened_session":False,"bar_gap":False,"membership_source_quality":"synthetic_or_prevalidated","split_factor":1.0}
     for column,value in defaults.items():
         if column not in x:x[column]=value
+    x=apply_analysis_eligibility(x); x["benchmark_valid"]=benchmark_valid_mask(x,config.benchmark_symbol)
     for column in ["open","high","low","close","vwap"]:
         if f"{column}_raw" not in x:x[f"{column}_raw"]=x[column]
         if f"{column}_adjusted" not in x:x[f"{column}_adjusted"]=x[column]
@@ -40,7 +43,8 @@ def build_features(
     g=x.groupby("symbol",sort=False)
     sg=x.groupby(["symbol","session_date"],sort=False)
     rg=x.groupby(["symbol","session_date","gap_segment"],sort=False)
-    x["_intraday_ret"]=sg["close"].pct_change(); x["_continuous_ret"]=g["close"].pct_change()
+    total_close=x["close_total_return_adjusted"] if "close_total_return_adjusted" in x else x.close
+    x["_intraday_ret"]=rg["close"].pct_change(); x["_continuous_ret"]=total_close.groupby(x.symbol,sort=False).pct_change()
     x["_ret"]=x._intraday_ret; x["intraday_return_1"]=x._intraday_ret; x["continuous_return_1"]=x._continuous_ret
     x["_prev_close"] = g["close"].shift(); x["_range"] = x.high - x.low
     x["_session_open"] = x.groupby(["symbol", "session_date"], sort=False)["open"].transform("first")
@@ -53,14 +57,14 @@ def build_features(
     x["close_location"] = (x.close-x.low)/x._range.replace(0,np.nan)
     x["bar_return"] = x.close / x.open.replace(0, np.nan) - 1; x["bar_log_return"] = np.log(x.close / x.open.replace(0, np.nan))
     x["body_pct"] = (x.close-x.open)/x.open.replace(0,np.nan); x["absolute_body_pct"] = x.body_pct.abs()
-    prev_high=sg.high.shift(); prev_low=sg.low.shift(); has_previous=prev_high.notna()&prev_low.notna()
+    prev_high=rg.high.shift(); prev_low=rg.low.shift(); has_previous=prev_high.notna()&prev_low.notna()
     x["inside_bar"]=((x.high<=prev_high)&(x.low>=prev_low)).astype(float).where(has_previous); x["outside_bar"]=((x.high>=prev_high)&(x.low<=prev_low)).astype(float).where(has_previous)
     x["higher_high"]=(x.high>prev_high).astype(float).where(has_previous); x["higher_low"]=(x.low>prev_low).astype(float).where(has_previous); x["lower_high"]=(x.high<prev_high).astype(float).where(has_previous); x["lower_low"]=(x.low<prev_low).astype(float).where(has_previous)
     x["session_range_position"]=(x.close-x._session_low)/(x._session_high-x._session_low).replace(0,np.nan)
     x["cumulative_volume"]=x._cum_vol; x["current_volume_share"]=x.volume/x._cum_vol.replace(0,np.nan)
-    x["_session_vwap"]=x._cum_pv/x._cum_vol.replace(0,np.nan); x["vwap_slope"]=sg._session_vwap.diff()
-    side=np.sign(x.close-x._session_vwap); previous_side=side.groupby([x.symbol,x.session_date],sort=False).shift(); x["vwap_cross"]=((previous_side<=0)&(side>0)|(previous_side>=0)&(side<0)).astype(float).where(previous_side.notna())
-    x["consecutive_positive_bars"]=_session_run_length(x._ret.gt(0),x.symbol,x.session_date); x["consecutive_negative_bars"]=_session_run_length(x._ret.lt(0),x.symbol,x.session_date)
+    x["_session_vwap"]=x._cum_pv/x._cum_vol.replace(0,np.nan); x["vwap_slope"]=x._session_vwap.groupby([x.symbol,x.session_date,x.gap_segment],sort=False).diff()
+    side=np.sign(x.close-x._session_vwap); previous_side=side.groupby([x.symbol,x.session_date,x.gap_segment],sort=False).shift(); x["vwap_cross"]=((previous_side<=0)&(side>0)|(previous_side>=0)&(side<0)).astype(float).where(previous_side.notna())
+    x["consecutive_positive_bars"]=_session_run_length(x._ret.gt(0),x.symbol,x.session_date,x.gap_segment); x["consecutive_negative_bars"]=_session_run_length(x._ret.lt(0),x.symbol,x.session_date,x.gap_segment)
     local=x.available_at_ts.dt.tz_convert("America/New_York"); x["bar_start_minute"]=((x.bar_start_ts-x.scheduled_open).dt.total_seconds()/60).astype(int); x["minutes_since_open"]=(x.available_at_ts-x.scheduled_open).dt.total_seconds()/60; x["minute_of_session"]=x.minutes_since_open; x["minutes_until_close"]=(x.scheduled_close-x.available_at_ts).dt.total_seconds()/60
     x["day_of_week"]=local.dt.dayofweek; x["month"]=local.dt.month; x["quarter"]=local.dt.quarter; x["decision_time_bucket"]=(x.minutes_since_open//30).astype(int)
     phase=2*np.pi*x.minutes_since_open/x.session_length_minutes.replace(0,np.nan); x["decision_time_sin"]=np.sin(phase); x["decision_time_cos"]=np.cos(phase)
@@ -81,17 +85,18 @@ def build_features(
         x[f"breakout_magnitude_{n}"]=(x.close/prior_high-1).clip(lower=0); x[f"breakdown_magnitude_{n}"]=(x.close/prior_low-1).clip(upper=0)
         half=max(1,n//2); short_vol=rg.volume.rolling(half,min_periods=half).mean().reset_index(level=[0,1,2],drop=True); short_rv=rg._ret.rolling(half,min_periods=max(1,half)).std().reset_index(level=[0,1,2],drop=True)
         x[f"volume_acceleration_{n}"]=short_vol/x[f"volume_mean_{n}"].replace(0,np.nan)-1; x[f"volatility_acceleration_{n}"]=short_rv/rv.replace(0,np.nan)-1
-        pv=(x.close*x.volume).groupby([x.symbol,x.session_date,x.gap_segment]).rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); vv=rg.volume.rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); x[f"rolling_vwap_distance_{n}"]=x.close/(pv/vv.replace(0,np.nan))-1
+        pv=(x.close*x.volume).groupby([x.symbol,x.session_date,x.gap_segment]).rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); vv=rg.volume.rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); x=x.copy(); x[f"rolling_vwap_distance_{n}"]=x.close/(pv/vv.replace(0,np.nan))-1
         x[f"volume_range_ratio_{n}"]=x.volume/(x._range.replace(0,np.nan)); x[f"return_volume_product_{n}"]=x._ret*x.volume; x[f"return_outlier_score_{n}"]=x._ret/rv.replace(0,np.nan)
         if not symbol_local:
-            eligible=x.symbol_role.eq("tradable")
+            eligible=x.analysis_eligible
             for base in ["return","relative_volume","realized_vol","range_position","return_vol_ratio"]: x[f"{base}_rank_{n}"]=x[f"{base}_{n}"].where(eligible).groupby(x.decision_ts).rank(pct=True)
         for column in set(x.columns)-columns_before:
             if pd.api.types.is_float_dtype(x[column]): x[column]=x[column].astype(np.float32)
         # Consolidate blocks between lookbacks; otherwise hundreds of scalar
         # inserts make both construction and later projection much slower.
         x=x.copy(); g=x.groupby("symbol",sort=False); sg=x.groupby(["symbol","session_date"],sort=False); rg=x.groupby(["symbol","session_date","gap_segment"],sort=False)
-    daily=x.groupby(["symbol","session_date"],sort=False).agg(session_open=("open","first"),session_close=("close","last"))
+    total_open=x["open_total_return_adjusted"] if "open_total_return_adjusted" in x else x.open; total_close=x["close_total_return_adjusted"] if "close_total_return_adjusted" in x else x.close
+    daily=pd.DataFrame({"symbol":x.symbol,"session_date":x.session_date,"total_open":total_open,"total_close":total_close}).groupby(["symbol","session_date"],sort=False).agg(session_open=("total_open","first"),session_close=("total_close","last"))
     daily["previous_close"]=daily.groupby(level=0).session_close.shift()
     completed_return=daily.groupby(level=0).session_close.pct_change()
     # At any decision in session D, only returns through D-1 are known.
@@ -104,18 +109,18 @@ def build_features(
         daily[f"session_return_{sessions}"]=daily.groupby(level=0).session_close.shift(1)/daily.groupby(level=0).session_close.shift(sessions+1)-1
         x=x.join(daily[[f"session_return_{sessions}"]],on=["symbol","session_date"])
     if not symbol_local and config.benchmark_symbol in set(x.symbol):
-        market=x.loc[x.symbol.eq(config.benchmark_symbol),["decision_ts","_ret"]].drop_duplicates("decision_ts").set_index("decision_ts")["_ret"]
+        market=x.loc[x.benchmark_valid,["decision_ts","_ret"]].drop_duplicates("decision_ts").set_index("decision_ts")["_ret"]
         x["market_return_1"]=x.decision_ts.map(market); x["stock_minus_market_return_1"]=x._ret-x.market_return_1
     elif not symbol_local: x["market_return_1"]=np.nan; x["stock_minus_market_return_1"]=np.nan
     if not symbol_local:
-        eligible=x.symbol_role.eq("tradable") & x.scan_eligible
-        breadth=x.loc[eligible].groupby("decision_ts")._ret.apply(lambda s: float((s>0).mean()))
-        dispersion=x.loc[eligible].groupby("decision_ts")._ret.std()
-        x["universe_breadth_positive"]=x.decision_ts.map(breadth); x["universe_return_dispersion"]=x.decision_ts.map(dispersion)
+        eligible=x.analysis_eligible
+        cross_valid=eligible&x._ret.notna(); breadth=x.loc[cross_valid].groupby("decision_ts")._ret.apply(lambda s: float((s>0).mean()))
+        dispersion=x.loc[cross_valid].groupby("decision_ts")._ret.std()
+        x["universe_breadth_positive"]=x.decision_ts.map(breadth).where(x.analysis_eligible); x["universe_return_dispersion"]=x.decision_ts.map(dispersion).where(x.analysis_eligible)
         for n in sorted(active_lookbacks):
-            benchmark=x.loc[x.symbol.eq(config.benchmark_symbol),["decision_ts",f"return_{n}"]].drop_duplicates("decision_ts").set_index("decision_ts")[f"return_{n}"]
+            benchmark=x.loc[x.benchmark_valid,["decision_ts",f"return_{n}"]].drop_duplicates("decision_ts").set_index("decision_ts")[f"return_{n}"]
             x[f"market_return_{n}"]=x.decision_ts.map(benchmark); x[f"stock_minus_market_return_{n}"]=x[f"return_{n}"]-x[f"market_return_{n}"]
-        x["market_up"]=(x.market_return_1>0).astype(float); market_vol=x.loc[x.symbol.eq(config.benchmark_symbol),["bar_start_ts","realized_vol_10"]].rename(columns={"realized_vol_10":"_market_vol"}) if "realized_vol_10" in x else pd.DataFrame()
+        x["market_up"]=(x.market_return_1>0).astype(float).where(x.market_return_1.notna()); market_vol=x.loc[x.benchmark_valid,["bar_start_ts","realized_vol_10"]].rename(columns={"realized_vol_10":"_market_vol"}) if "realized_vol_10" in x else pd.DataFrame()
         if not market_vol.empty:
             market_vol=market_vol.sort_values("bar_start_ts").drop_duplicates("bar_start_ts")
             market_vol["_market_vol_median"]=market_vol._market_vol.expanding(min_periods=100).median()
@@ -162,7 +167,7 @@ def build_features(
     requested={s.name:s for s in specs}; built=[]
     for name,spec in requested.items():
         if spec.status=="requested" and name in x: built.append(spec)
-    identifiers=["symbol","session_date","bar_start_ts","bar_end_ts","available_at_ts","decision_ts","scheduled_open","scheduled_close","open","high","low","close","vwap","open_raw","high_raw","low_raw","close_raw","vwap_raw","open_adjusted","high_adjusted","low_adjusted","close_adjusted","vwap_adjusted","split_factor","symbol_role","pit_member","scan_eligible","session_grid_eligible","shortened_session","bar_gap","gap_segment","membership_source_quality"]
+    identifiers=["symbol","session_date","bar_start_ts","bar_end_ts","available_at_ts","decision_ts","scheduled_open","scheduled_close","open","high","low","close","vwap","open_raw","high_raw","low_raw","close_raw","vwap_raw","open_adjusted","high_adjusted","low_adjusted","close_adjusted","vwap_adjusted","split_factor","symbol_role","pit_member","scan_eligible","session_grid_eligible","analysis_eligible","benchmark_valid","shortened_session","bar_gap","gap_segment","membership_source_quality"]
     keep=identifiers+[s.name for s in built]
     # Projection is the memory boundary: temporary dependencies and unrelated
     # features never enter target construction or statistical scanning.
@@ -172,6 +177,6 @@ def build_features(
     return result, built
 
 
-def _session_run_length(mask: pd.Series, symbols: pd.Series, sessions: pd.Series) -> pd.Series:
-    blocks=(mask.ne(mask.shift())|symbols.ne(symbols.shift())|sessions.ne(sessions.shift())).cumsum()
+def _session_run_length(mask: pd.Series, symbols: pd.Series, sessions: pd.Series,gaps:pd.Series) -> pd.Series:
+    blocks=(mask.ne(mask.shift())|symbols.ne(symbols.shift())|sessions.ne(sessions.shift())|gaps.ne(gaps.shift())).cumsum()
     return mask.astype(int).groupby(blocks).cumsum()

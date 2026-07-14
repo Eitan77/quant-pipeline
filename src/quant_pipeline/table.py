@@ -13,6 +13,17 @@ from .config import ScanConfig
 from .registry import TargetSpec
 
 ET = "America/New_York"
+ROW_KEYS=["symbol","session_date","bar_start_ts","decision_ts"]
+
+
+def apply_analysis_eligibility(frame:pd.DataFrame)->pd.DataFrame:
+    out=frame.copy()
+    out["analysis_eligible"]=(out.symbol_role.eq("tradable")&out.pit_member.fillna(False)&out.scan_eligible.fillna(False)&out.session_grid_eligible.fillna(False))
+    return out
+
+
+def benchmark_valid_mask(frame:pd.DataFrame,benchmark_symbol:str)->pd.Series:
+    return (frame.symbol.eq(benchmark_symbol)&frame.symbol_role.eq("benchmark")&frame.pit_member.fillna(True)&frame.scan_eligible.fillna(False)&frame.session_grid_eligible.fillna(False))
 
 
 def load_canonical_bars(config: ScanConfig) -> pd.DataFrame:
@@ -48,12 +59,13 @@ def load_canonical_bars(config: ScanConfig) -> pd.DataFrame:
     bars["session_date"]=pd.to_datetime(bars.session_date).dt.normalize()
     bars=_attach_calendar(bars,config)
     bars=_attach_membership(bars,membership,config)
-    bars["pit_member"]=bars.is_member.fillna(False)
+    bars["pit_member"]=np.where(bars.symbol_role.eq("benchmark"),True,bars.is_member.fillna(False))
     bars["membership_source_quality"]=config.membership_source_quality
     bars["shortened_session"]=bars.is_shortened_session
     bars=_attach_adjusted_prices(bars,config)
     bars["decision_ts"]=bars.available_at_ts
-    bars["scan_eligible"]=bars.symbol_role.eq("tradable")
+    bars["scan_eligible"]=bars.bar_grid_valid&bars.available_at_ts.ge(bars.bar_end_ts)
+    bars=apply_analysis_eligibility(bars); bars["benchmark_valid"]=benchmark_valid_mask(bars,config.benchmark_symbol)
     return bars.sort_values(["symbol","bar_start_ts"]).reset_index(drop=True)
 
 
@@ -121,6 +133,18 @@ def _attach_adjusted_prices(bars: pd.DataFrame,config: ScanConfig) -> pd.DataFra
             out.loc[index,"split_factor"]=factors
     for column in ["open","high","low","close","vwap"]:
         out[f"{column}_adjusted"]=out[f"{column}_raw"]/out.split_factor
+    out["dividend_factor"]=1.0
+    if not actions.empty and "cash_amount" in actions:
+        dividends=actions.loc[actions.cash_amount.fillna(0).gt(0)&actions.ex_date.notna(),["symbol","ex_date","cash_amount"]]
+        for symbol,index in out.groupby("symbol",sort=False).groups.items():
+            factor=np.ones(len(index)); locations=np.asarray(list(index)); dates=out.loc[index,"session_date"].to_numpy(dtype="datetime64[ns]")
+            for action in dividends.loc[dividends.symbol.eq(symbol)].sort_values("ex_date").itertuples():
+                ex=np.datetime64(pd.Timestamp(action.ex_date).normalize()); prior=np.flatnonzero(dates<ex)
+                if not len(prior):continue
+                previous_close=float(out.loc[locations[prior[-1]],"close_adjusted"]); adjustment=1-float(action.cash_amount)/previous_close if previous_close>float(action.cash_amount) else np.nan
+                if np.isfinite(adjustment):factor[dates<ex]*=adjustment
+            out.loc[index,"dividend_factor"]=factor
+    for column in ["open","high","low","close","vwap"]:out[f"{column}_total_return_adjusted"]=out[f"{column}_adjusted"]*out.dividend_factor
     return out
 
 
@@ -129,10 +153,10 @@ def filter_decision_rows(frame: pd.DataFrame,config: ScanConfig) -> pd.DataFrame
     if config.decision_times_et:
         local=pd.to_datetime(out.decision_ts,utc=True).dt.tz_convert(ET)
         out=out.loc[local.dt.strftime("%H:%M").isin(config.decision_times_et)]
-    return out.loc[out.scan_eligible.fillna(False)&out.session_grid_eligible.fillna(False)].reset_index(drop=True)
+    return out.loc[out.analysis_eligible.fillna(False)].reset_index(drop=True)
 
 
-def add_targets(frame: pd.DataFrame,targets: list[TargetSpec],benchmark_symbol: str="QQQ") -> pd.DataFrame:
+def add_targets(frame: pd.DataFrame,targets: list[TargetSpec],benchmark_symbol: str="QQQ",config:ScanConfig|None=None) -> pd.DataFrame:
     """Locate the first genuinely actionable entry bar and explicit exits."""
     out=frame.sort_values(["symbol","session_date","bar_start_ts"],kind="stable").reset_index(drop=True).copy()
     if "open_raw" not in out:out["open_raw"]=out.open
@@ -160,14 +184,32 @@ def add_targets(frame: pd.DataFrame,targets: list[TargetSpec],benchmark_symbol: 
             exit_meta[target.name][rows]=ends[exits[valid]]
             exit_price_meta[target.name][rows]=closes[exits[valid]]
             actual_meta[target.name][rows]=((ends[exits[valid]]-starts[entries[valid]])/np.timedelta64(1,"m")).astype(np.float32)
+    row_valid=(out.analysis_eligible.fillna(False)|out.benchmark_valid.fillna(False)).to_numpy() if {"analysis_eligible","benchmark_valid"}.issubset(out) else np.ones(n,dtype=bool)
+    entry_ts[~row_valid]=np.datetime64("NaT"); entry_open[~row_valid]=np.nan
+    for name in values:values[name][~row_valid]=np.nan; exit_meta[name][~row_valid]=np.datetime64("NaT"); exit_price_meta[name][~row_valid]=np.nan; actual_meta[name][~row_valid]=np.nan
     additions={"entry_ts":pd.to_datetime(entry_ts,utc=True),"entry_open_raw":entry_open}
     for name,array in values.items():additions[name]=array; additions[f"exit_ts__{name}"]=pd.to_datetime(exit_meta[name],utc=True); additions[f"exit_close_raw__{name}"]=exit_price_meta[name]; additions[f"actual_horizon_minutes__{name}"]=actual_meta[name]
     out=pd.concat([out,pd.DataFrame(additions,index=out.index)],axis=1)
-    adjusted={}
+    adjusted={}; benchmark_mask=out.benchmark_valid.fillna(False) if "benchmark_valid" in out else out.symbol.eq(benchmark_symbol)
     for target in [t for t in targets if t.classification=="benchmark_adjusted"]:
         raw=target.name.removesuffix("_benchmark_adjusted")
-        benchmark=out.loc[out.symbol.eq(benchmark_symbol),["decision_ts",raw]].drop_duplicates("decision_ts").set_index("decision_ts")[raw]
+        benchmark=out.loc[benchmark_mask,["decision_ts",raw]].drop_duplicates("decision_ts").set_index("decision_ts")[raw]
         adjusted[target.name]=(out[raw]-out.decision_ts.map(benchmark)).astype(np.float32)
+    beta_specs=[t for t in targets if t.classification=="beta_residual"]
+    if beta_specs:
+        cfg=config or ScanConfig(); close_column="close_total_return_adjusted" if "close_total_return_adjusted" in out else "close_adjusted" if "close_adjusted" in out else "close_raw"
+        daily=out.groupby(["symbol","session_date"],sort=False)[close_column].last().unstack("symbol"); returns=daily.pct_change(); market=returns.get(benchmark_symbol)
+        beta_lookup={}
+        if market is not None:
+            for symbol in returns:
+                covariance=returns[symbol].rolling(cfg.beta_window_sessions,min_periods=cfg.beta_min_observations).cov(market); variance=market.rolling(cfg.beta_window_sessions,min_periods=cfg.beta_min_observations).var(); beta_lookup[symbol]=(covariance/variance.replace(0,np.nan)).shift(1)
+        beta_values=pd.Series(np.nan,index=out.index,dtype=float)
+        for symbol,indices in out.groupby("symbol",sort=False).groups.items():
+            if symbol in beta_lookup:beta_values.loc[indices]=out.loc[indices,"session_date"].map(beta_lookup[symbol]).to_numpy()
+        adjusted["beta_at_decision"]=beta_values
+        for target in beta_specs:
+            raw=target.name.removesuffix("_beta_residual"); benchmark=out.loc[benchmark_mask,["decision_ts",raw]].drop_duplicates("decision_ts").set_index("decision_ts")[raw]
+            adjusted[target.name]=(out[raw]-beta_values*out.decision_ts.map(benchmark)).astype(np.float32)
     if adjusted:out=pd.concat([out,pd.DataFrame(adjusted,index=out.index)],axis=1)
     return out
 
@@ -182,6 +224,7 @@ def validate_point_in_time(frame: pd.DataFrame,targets: list[TargetSpec],sealed_
     entry_before=int((frame.entry_ts<frame.decision_ts).fillna(False).sum())
     exit_before=0
     cross_session=0
+    horizon_mismatch=0; missing_entry_price=0; missing_exit_price=0
     for target in [t for t in targets if t.classification=="raw"]:
         column=f"exit_ts__{target.name}"
         if column not in frame: continue
@@ -189,6 +232,11 @@ def validate_point_in_time(frame: pd.DataFrame,targets: list[TargetSpec],sealed_
         exit_before+=int((frame.loc[valid,column]<=frame.loc[valid,"entry_ts"]).sum())
         exit_local=frame.loc[valid,column].dt.tz_convert(ET).dt.date
         cross_session+=int((exit_local!=pd.to_datetime(frame.loc[valid,"session_date"]).dt.date).sum())
+        price_column=f"exit_close_raw__{target.name}"; horizon_column=f"actual_horizon_minutes__{target.name}"
+        target_valid=frame[target.name].notna() if target.name in frame else pd.Series(False,index=frame.index)
+        missing_entry_price+=int((target_valid&frame.entry_open_raw.isna()).sum()) if "entry_open_raw" in frame else int(target_valid.sum())
+        missing_exit_price+=int((target_valid&frame[price_column].isna()).sum()) if price_column in frame else int(target_valid.sum())
+        if target.horizon_minutes is not None and horizon_column in frame:horizon_mismatch+=int((target_valid&frame[horizon_column].ne(target.horizon_minutes)).sum())
     holdout=int((pd.to_datetime(frame.session_date)>=pd.Timestamp(sealed_holdout_start)).sum()) if sealed_holdout_start else 0
     universe=int((frame.symbol_role.eq("tradable")&frame.is_member.ne(True)).sum()) if "is_member" in frame else 0
     grid=int((~frame.bar_grid_valid.fillna(False)).sum()) if "bar_grid_valid" in frame else 0
@@ -199,14 +247,14 @@ def validate_point_in_time(frame: pd.DataFrame,targets: list[TargetSpec],sealed_
         if raw in frame and target.name in frame:
             eligible=frame.symbol_role.eq("tradable") if "symbol_role" in frame else pd.Series(True,index=frame.index)
             benchmark_alignment+=int((eligible&frame[raw].notna()&frame[target.name].isna()).sum())
-    failures=duplicate+source_duplicate+availability+entry_before+exit_before+cross_session+holdout+universe+grid+benchmark_alignment
-    if failures: raise ValueError(f"PIT validation failed: duplicates={duplicate}, source_duplicates={source_duplicate}, availability={availability}, entry={entry_before}, exit={exit_before}, cross_session={cross_session}, holdout={holdout}, universe={universe}, grid={grid}, benchmark_alignment={benchmark_alignment}")
+    failures=duplicate+source_duplicate+availability+entry_before+exit_before+cross_session+horizon_mismatch+missing_entry_price+missing_exit_price+holdout+universe+grid+benchmark_alignment
+    if failures: raise ValueError(f"PIT validation failed: duplicates={duplicate}, source_duplicates={source_duplicate}, availability={availability}, entry={entry_before}, exit={exit_before}, cross_session={cross_session}, horizon={horizon_mismatch}, entry_price={missing_entry_price}, exit_price={missing_exit_price}, holdout={holdout}, universe={universe}, grid={grid}, benchmark_alignment={benchmark_alignment}")
     sessions=frame.drop_duplicates(["symbol","session_date"])
     expected=int(sessions.expected_bars_in_session.sum()) if "expected_bars_in_session" in sessions else 0; missing_bars=int(sessions.missing_bars_in_session.sum()) if "missing_bars_in_session" in sessions else 0
     incomplete=sessions.loc[sessions.missing_bars_in_session.gt(0)] if "missing_bars_in_session" in sessions else sessions.iloc[0:0]
     excluded=sessions.loc[~sessions.session_grid_eligible.fillna(False)] if "session_grid_eligible" in sessions else sessions.iloc[0:0]
     excessive=sorted(excluded.symbol.unique().tolist()) if len(excluded) else []
-    return {"rows":len(frame),"duplicate_identifiers":duplicate,"duplicate_source_bars":source_duplicate,"availability_violations":availability,"target_timing_violations":entry_before+exit_before,"target_cross_session_violations":cross_session,"holdout_rows":holdout,"universe_violations":universe,"grid_violations":grid,"benchmark_alignment_violations":benchmark_alignment,"expected_bars":expected,"missing_bars":missing_bars,"missing_bar_rate":missing_bars/expected if expected else 0.0,"incomplete_sessions":len(incomplete),"sessions_excluded":len(excluded),"symbols_with_excessive_missingness":excessive,"target_columns":len(targets)}
+    return {"rows":len(frame),"duplicate_identifiers":duplicate,"duplicate_source_bars":source_duplicate,"availability_violations":availability,"target_timing_violations":entry_before+exit_before,"entry_before_decision_violations":entry_before,"exit_before_entry_violations":exit_before,"target_cross_session_violations":cross_session,"horizon_mismatch_violations":horizon_mismatch,"missing_entry_price_rows":missing_entry_price,"missing_exit_price_rows":missing_exit_price,"holdout_rows":holdout,"universe_violations":universe,"grid_violations":grid,"missing_benchmark_rows":benchmark_alignment,"expected_bars":expected,"missing_bars":missing_bars,"missing_bar_rate":missing_bars/expected if expected else 0.0,"incomplete_sessions":len(incomplete),"sessions_excluded":len(excluded),"symbols_with_excessive_missingness":excessive,"target_columns":len(targets)}
 
 
 def source_provenance(config: ScanConfig) -> dict:
@@ -215,5 +263,7 @@ def source_provenance(config: ScanConfig) -> dict:
         schema=con.execute(f"describe {config.source_table}").fetchall()
         stats=con.execute(f"""select count(*),min(bar_start_ts),max(bar_end_ts),count(distinct symbol),max(ingested_at)
           from {config.source_table} where feed=? and adjustment=? and cast(session_date as date) between cast(? as date) and cast(? as date)""",[config.feed,config.adjustment,config.start,config.discovery_end]).fetchone()
+        partitions=con.execute(f"""select year(cast(session_date as date)),count(*),min(bar_start_ts),max(bar_end_ts),max(ingested_at) from {config.source_table} where feed=? and adjustment=? and cast(session_date as date) between cast(? as date) and cast(? as date) group by 1 order by 1""",[config.feed,config.adjustment,config.start,config.discovery_end]).fetchall()
+        membership=con.execute(f"""select count(*),min(date),max(date),count(distinct symbol),sum(case when is_member then 1 else 0 end) from {config.membership_table} where cast(date as date) between cast(? as date) and cast(? as date)""",[config.start,config.discovery_end]).fetchone()
     finally: con.close()
-    return {"catalog_path":config.catalog_path,"source_table":config.source_table,"row_count":stats[0],"minimum_timestamp":str(stats[1]),"maximum_timestamp":str(stats[2]),"symbol_count":stats[3],"latest_ingestion_timestamp":str(stats[4]),"feed":config.feed,"adjustment":config.adjustment,"source_schema_hash":hashlib.sha256(json.dumps(schema,default=str).encode()).hexdigest(),"duplicate_resolution_policy":"latest ingested row per symbol and bar_start_ts","corporate_action_source":config.corporate_actions_path,"universe_source":config.membership_table,"sector_source":config.sector_map_path,"exchange_calendar":config.exchange_calendar}
+    return {"catalog_path":config.catalog_path,"source_table":config.source_table,"row_count":stats[0],"minimum_timestamp":str(stats[1]),"maximum_timestamp":str(stats[2]),"symbol_count":stats[3],"latest_ingestion_timestamp":str(stats[4]),"feed":config.feed,"adjustment":config.adjustment,"bar_frequency":"5m","holdout_boundary":config.sealed_holdout_start,"source_schema_hash":hashlib.sha256(json.dumps(schema,default=str).encode()).hexdigest(),"source_partition_fingerprint":hashlib.sha256(json.dumps(partitions,default=str).encode()).hexdigest(),"membership_fingerprint":hashlib.sha256(json.dumps(membership,default=str).encode()).hexdigest(),"duplicate_resolution_policy":"latest ingested row per symbol and bar_start_ts","corporate_action_source":config.corporate_actions_path,"universe_source":config.membership_table,"sector_source":config.sector_map_path,"exchange_calendar":config.exchange_calendar}

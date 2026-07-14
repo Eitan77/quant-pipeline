@@ -1,8 +1,8 @@
-# Phase 1.1 correction notes
+# Phase 1.3 final repair notes
 
 This revision repairs Phase 1 without opening the sealed holdout beginning
 May 1, 2026. The next run must use
-`phase1_1_corrected_discovery_through_20260430`; old caches are incompatible.
+`phase1_3_final_corrected_through_20260430`; old caches are incompatible.
 
 ## Data and timing corrections
 
@@ -10,7 +10,8 @@ May 1, 2026. The next run must use
   VWAP slopes, and VWAP crosses reset at every session and bar-gap boundary.
 - Continuous close-to-close returns are separately named.
 - Research OHLC/VWAP is split adjusted from the pinned corporate-action
-  ledger; target entries and exits retain raw execution prices.
+  ledger. Cross-session returns use the total-return series, including cash
+  dividends; target entries and exits retain raw execution prices.
 - Daily point-in-time membership controls the tradable cross-section. QQQ has
   an explicit non-tradable benchmark role.
 - The XNYS calendar supplies holidays, DST-aware opens/closes, and shortened
@@ -28,10 +29,13 @@ May 1, 2026. The next run must use
 - Exact diagnostics add two-way date/symbol clustering, session-level
   quantile uncertainty, session bootstrap intervals, HAC daily spreads, and
   HAC cross-sectional IC.
-- Categorical variables use a categorical omnibus scan instead of Pearson.
+- Categorical variables use a clustered dummy-variable omnibus scan instead
+  of Pearson or an unclustered rank test.
 - Normalization denominators are explicitly prior-only or inclusive.
 - Primary promotion targets are 5, 15, 30, 60, 120 minutes, and EOD. The full
   five-minute horizon grid remains exploratory only.
+- Raw, benchmark-adjusted, and prior-only rolling-beta residual target
+  families are registered separately.
 - Candidate clustering combines economic family, feature-value correlation,
   parameter redundancy, target-horizon family, and response direction.
 - Discovery is fixed to 2019-2023. Definitions selected there are evaluated
@@ -48,6 +52,10 @@ May 1, 2026. The next run must use
 - Coverage and feature-build ledgers include skipped and unavailable items.
 - The manifest records the data snapshot, missing bars, excluded sessions,
   adjustment sources, and the sealed-holdout boundary.
+- Cache metadata records sorted row keys, row counts, key hashes, schemas, and
+  fingerprints; resume refuses reordered, duplicated, or mismatched caches.
+- Every target batch reruns timing, uniqueness, eligibility, price, and
+  holdout checks before screening.
 
 ## Deliberate fail-closed limitations
 
@@ -56,5 +64,6 @@ May 1, 2026. The next run must use
   represented as an exchange-native announcement-time history.
 - Sector-dependent features remain explicitly unavailable because no reviewed
   point-in-time sector map is configured; they are not approximated.
-- No real-data smoke test, corrected full run, or holdout access has occurred
-  in this revision. Those actions await review and approval.
+- One-day and one-month pre-holdout real-data smoke tests, including cache
+  resume, completed successfully. The corrected full run has not started and
+  no data dated May 1, 2026 or later was inspected or used.

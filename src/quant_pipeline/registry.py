@@ -50,7 +50,8 @@ def target_registry(horizons: Iterable[int] | None = None, primary_horizons: Ite
         for m in horizons
     ] + [TargetSpec("fwd_return_eod", "Raw return from next actionable open to scheduled RTH close", None, "first bar open at/after decision availability", "scheduled final complete RTH bar close", tier="primary")]
     adjusted = [TargetSpec(t.name+"_benchmark_adjusted", t.description+" minus benchmark return", t.horizon_minutes, t.entry_definition, t.exit_definition, "benchmark_adjusted", t.overlaps, t.tier) for t in raw]
-    return raw + adjusted
+    beta = [TargetSpec(t.name+"_beta_residual", t.description+" minus prior-only beta times benchmark return", t.horizon_minutes, t.entry_definition, t.exit_definition, "beta_residual", t.overlaps, t.tier) for t in raw]
+    return raw + adjusted + beta
 
 
 def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, opening_windows: Iterable[int] | None = None) -> list[FeatureSpec]:
