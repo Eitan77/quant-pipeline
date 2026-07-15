@@ -16,6 +16,7 @@ data/
 !results/**/*.md
 !results/**/*.html
 !results/**/*.png
+!results/**/*.zip
 
 # Secrets and machine-local configuration
 .env
