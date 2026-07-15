@@ -21,7 +21,10 @@ def build_features(
     if any(s.family=="normalization" for s in specs): active_lookbacks.update({1,10})
     active_lead_lags={int(s.lookback) for s in specs if s.family=="lead_lag" and s.lookback is not None}
     active_lookbacks.update(active_lead_lags)
-    x = bars.sort_values(["symbol", "bar_start_ts"], kind="stable").copy()
+    # All later rolling/grouped results align on this canonical row order.
+    # Filtered Parquet shards retain arbitrary source indexes; resetting here
+    # prevents pandas from silently realigning values to stale row labels.
+    x = bars.sort_values(["symbol", "bar_start_ts"], kind="stable").reset_index(drop=True).copy()
     if "decision_ts" not in x:x["decision_ts"]=x["available_at_ts"]
     if "gap_segment" not in x:x["gap_segment"]=0
     if "scheduled_open" not in x:x["scheduled_open"]=x.groupby(["symbol","session_date"]).bar_start_ts.transform("min")

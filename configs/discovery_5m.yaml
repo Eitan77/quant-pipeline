@@ -34,6 +34,7 @@ experiment_id: phase1_final_discovery_through_20260430
 use_cuda: true
 cuda_device: cuda:0
 feature_workers: 16
+feature_build_batch_chunks: 2
 exact_workers: 6
 resume: true
 checkpoint_every_pairs: 25

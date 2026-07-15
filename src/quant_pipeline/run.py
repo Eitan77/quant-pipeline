@@ -11,7 +11,7 @@ import pandas as pd
 
 from .config import ScanConfig
 from .features import build_features
-from .parallel_features import build_parallel_block, is_symbol_local
+from .parallel_features import build_parallel_blocks, is_symbol_local
 from .registry import feature_registry, registry_frame, target_registry
 from .scanner import benjamini_hochberg,scan
 from .bulk_scan import cuda_screen, finalize_screen
@@ -62,27 +62,45 @@ def execute(config: ScanConfig) -> Path:
     del bars; bars=None; gc.collect()
     # Symbol-local blocks are built by 16 independent processes. Features that
     # require the full cross-section remain full-universe calculations.
-    feature_paths=[]; built_by_chunk=[]
+    feature_paths=[]
     for feature_index,chunk in enumerate(chunks):
         digest=hashlib.sha1("\n".join(s.name for s in chunk).encode()).hexdigest()[:10]
-        path=feature_root/f"feature_{feature_index:03d}_{digest}.parquet"; feature_paths.append(path)
+        feature_paths.append(feature_root/f"feature_{feature_index:03d}_{digest}.parquet")
+    built_by_chunk=[[] for _ in chunks]; completed_features=set()
+
+    def finish_feature_block(feature_index,built):
+        path=feature_paths[feature_index]
+        if not path.with_suffix(path.suffix+".meta.json").exists():
+            metadata_frame=pd.read_parquet(path); write_cache_metadata(path,metadata_frame,fingerprint_sha,config.sealed_holdout_start); del metadata_frame
+        built_by_chunk[feature_index]=built; built_names.update(s.name for s in built); completed_features.add(feature_index)
+        (root/"progress.json").write_text(json.dumps({"stage":"feature_cache","completed":len(completed_features),"total":len(chunks),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
+
+    for feature_index,(chunk,path) in enumerate(zip(chunks,feature_paths)):
         if path.exists():
             validate_cache(path,fingerprint_sha,config.sealed_holdout_start)
             import pyarrow.parquet as pq
             columns=set(pq.ParquetFile(path).schema.names); built=[s for s in chunk if s.name in columns]
-        elif all(is_symbol_local(spec) for spec in chunk):
-            built=build_parallel_block(bars_cache,path,config,chunk,root/"progress.json")
-        else:
+            finish_feature_block(feature_index,built)
+
+    local_pending=[index for index,chunk in enumerate(chunks) if index not in completed_features and all(is_symbol_local(spec) for spec in chunk)]
+    batch_size=config.feature_build_batch_chunks
+    for start in range(0,len(local_pending),batch_size):
+        indices=local_pending[start:start+batch_size]
+        outputs=[(feature_paths[index],chunks[index]) for index in indices]
+        built_batch=build_parallel_blocks(bars_cache,outputs,config,root/"progress.json")
+        for index,built in zip(indices,built_batch):finish_feature_block(index,built)
+        gc.collect()
+
+    for feature_index,(chunk,path) in enumerate(zip(chunks,feature_paths)):
+        if feature_index in completed_features:continue
+        if not all(is_symbol_local(spec) for spec in chunk):
             if bars is None:
                 bars=pd.read_parquet(bars_cache)
                 for column in ["open","high","low","close","vwap","volume"]:
                     if column in bars: bars[column]=pd.to_numeric(bars[column],downcast="float")
             feature_frame,built=build_features(bars,config,chunk)
             feature_frame.to_parquet(path,index=False); del feature_frame; gc.collect()
-        if not path.with_suffix(path.suffix+".meta.json").exists():
-            metadata_frame=pd.read_parquet(path); write_cache_metadata(path,metadata_frame,fingerprint_sha,config.sealed_holdout_start); del metadata_frame
-        built_by_chunk.append(built); built_names.update(s.name for s in built)
-        (root/"progress.json").write_text(json.dumps({"stage":"feature_cache","completed":feature_index+1,"total":len(chunks),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
+            finish_feature_block(feature_index,built)
     del bars; gc.collect()
     resume_frames=[]
     if config.resume and checkpoint.exists(): resume_frames.append(pd.read_csv(checkpoint))

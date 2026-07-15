@@ -7,6 +7,7 @@ from quant_pipeline.config import ScanConfig
 from quant_pipeline.bulk_scan import _clustered_inference_from_moments, _pair_moments_stable
 from quant_pipeline.features import build_features
 from quant_pipeline.gpu import CorrelationBackend
+from quant_pipeline.parallel_features import build_parallel_blocks
 from quant_pipeline.registry import feature_registry, target_registry
 from quant_pipeline.run import _classify_detailed_candidates
 from quant_pipeline.scanner import _clustered_slope, scan
@@ -44,6 +45,29 @@ def test_signed_features_do_not_register_unstable_mean_ratios():
     assert "return_1_mean_ratio_1560" not in names
     assert "distance_session_vwap_mean_ratio_4680" not in names
     assert "range_position_10_mean_ratio_1560" in names
+
+
+def test_symbol_worker_builds_multiple_scan_blocks_in_one_pass(tmp_path):
+    bars=fixture_bars(days=2)
+    for column in ["open","high","low","close","vwap","volume"]:bars[column]=pd.to_numeric(bars[column],downcast="float")
+    canonical=tmp_path/"bars.parquet"; bars.to_parquet(canonical,index=False)
+    cfg=ScanConfig(lookbacks=[1,2],feature_workers=2)
+    registry={spec.name:spec for spec in feature_registry(cfg.lookbacks)}
+    chunks=[[registry["return_1"]],[registry["realized_vol_2"]]]
+    paths=[tmp_path/"first.parquet",tmp_path/"second.parquet"]
+    built=build_parallel_blocks(canonical,list(zip(paths,chunks)),cfg,tmp_path/"progress.json")
+    first=pd.read_parquet(paths[0]); second=pd.read_parquet(paths[1])
+    expected,_=build_features(bars,cfg,[*chunks[0],*chunks[1]],symbol_local=True)
+    assert "return_1" in first and "realized_vol_2" not in first
+    assert "realized_vol_2" in second and "return_1" not in second
+    assert [[spec.name for spec in group] for group in built]==[["return_1"],["realized_vol_2"]]
+    first_check=first[["symbol","bar_start_ts","return_1"]].merge(expected[["symbol","bar_start_ts","return_1"]],on=["symbol","bar_start_ts"],suffixes=("_actual","_expected"),validate="one_to_one")
+    second_check=second[["symbol","bar_start_ts","realized_vol_2"]].merge(expected[["symbol","bar_start_ts","realized_vol_2"]],on=["symbol","bar_start_ts"],suffixes=("_actual","_expected"),validate="one_to_one")
+    np.testing.assert_allclose(first_check.return_1_actual,first_check.return_1_expected,equal_nan=True)
+    np.testing.assert_allclose(second_check.realized_vol_2_actual,second_check.realized_vol_2_expected,equal_nan=True)
+    aaa=first.loc[(first.symbol.eq("AAA"))&(first.session_date.astype(str).eq("2026-04-02"))].sort_values("bar_start_ts")
+    expected_second=float(aaa.close.iloc[1]/aaa.close.iloc[0]-1)
+    assert np.isclose(aaa.return_1.iloc[1],expected_second)
 
 
 def test_scanner_outputs_fdr_ranking_and_cuda_backend(tmp_path):

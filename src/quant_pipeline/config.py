@@ -53,6 +53,7 @@ class ScanConfig:
     cuda_device: str = "cuda:0"
     scan_batch_rows: int = 250_000
     feature_chunk_size: int = 24
+    feature_build_batch_chunks: int = 2
     feature_workers: int = 16
     exact_workers: int = 6
     target_chunk_size: int = 4
@@ -114,3 +115,4 @@ class ScanConfig:
         if self.use_separate_confirmation_period and (not self.selection_end or not self.confirmation_start):
             raise ValueError("Separate confirmation mode requires selection_end and confirmation_start")
         if any(value<=0 for value in self.recency_half_lives_months):raise ValueError("Recency half-lives must be positive")
+        if self.feature_build_batch_chunks<=0:raise ValueError("feature_build_batch_chunks must be positive")
