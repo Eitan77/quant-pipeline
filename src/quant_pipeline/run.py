@@ -47,18 +47,29 @@ def execute(config: ScanConfig) -> Path:
         raw_batch=raw_targets[start:start+config.target_chunk_size]; names={t.name for t in raw_batch}
         target_batches.append(raw_batch+[t for t in targets if (t.classification=="benchmark_adjusted" and t.name.removesuffix("_benchmark_adjusted") in names) or (t.classification=="beta_residual" and t.name.removesuffix("_beta_residual") in names)])
     # Materialize each target block once. They are reused by every feature block.
-    target_paths=[]
-    for target_index,target_batch in enumerate(target_batches):
-        path=target_root/f"target_{target_index:03d}.parquet"; target_paths.append(path)
-        if not path.exists():
-            if bars is None: bars=pd.read_parquet(bars_cache)
-            target_frame=add_targets(bars,target_batch,config.benchmark_symbol,config); record=validate_point_in_time(target_frame,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record)
+    target_paths=[target_root/f"target_{target_index:03d}.parquet" for target_index in range(len(target_batches))]
+    completed_targets=set()
+    for target_index,(target_batch,path) in enumerate(zip(target_batches,target_paths)):
+        if not path.exists():continue
+        validate_cache(path,fingerprint_sha,config.sealed_holdout_start); cached=pd.read_parquet(path)
+        record=validate_point_in_time(cached,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record); del cached
+        completed_targets.add(target_index)
+    target_pending=[index for index in range(len(target_batches)) if index not in completed_targets]
+    for start in range(0,len(target_pending),config.target_build_batch_chunks):
+        indices=target_pending[start:start+config.target_build_batch_chunks]
+        if bars is None:bars=pd.read_parquet(bars_cache)
+        combined_targets=[target for index in indices for target in target_batches[index]]
+        target_frame=add_targets(bars,combined_targets,config.benchmark_symbol,config)
+        for target_index in indices:
+            target_batch=target_batches[target_index]; path=target_paths[target_index]
+            record=validate_point_in_time(target_frame,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record)
             identifiers=[*ROW_KEYS,"bar_end_ts","available_at_ts","symbol_role","pit_member","scan_eligible","session_grid_eligible","analysis_eligible","benchmark_valid"]
             target_columns=[*identifiers,"entry_ts","entry_open_raw","beta_at_decision",*[t.name for t in target_batch],*[f"exit_ts__{t.name}" for t in target_batch if t.classification=="raw"],*[f"exit_close_raw__{t.name}" for t in target_batch if t.classification=="raw"],*[f"actual_horizon_minutes__{t.name}" for t in target_batch if t.classification=="raw"]]
-            target_columns=[c for c in target_columns if c in target_frame]; cached=target_frame[target_columns].copy(); cached.to_parquet(path,index=False); write_cache_metadata(path,cached,fingerprint_sha,config.sealed_holdout_start); del target_frame,cached; gc.collect()
-        else:
-            validate_cache(path,fingerprint_sha,config.sealed_holdout_start); cached=pd.read_parquet(path); record=validate_point_in_time(cached,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record); del cached
-        (root/"progress.json").write_text(json.dumps({"stage":"target_cache","completed":target_index+1,"total":len(target_batches),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
+            target_columns=[column for column in target_columns if column in target_frame]
+            cached=target_frame.loc[:,target_columns].copy(); cached.to_parquet(path,index=False); write_cache_metadata(path,cached,fingerprint_sha,config.sealed_holdout_start); del cached
+            completed_targets.add(target_index)
+            (root/"progress.json").write_text(json.dumps({"stage":"target_cache","completed":len(completed_targets),"total":len(target_batches),"build_batch":indices,"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
+        del target_frame; gc.collect()
     del bars; bars=None; gc.collect()
     # Symbol-local blocks are built by 16 independent processes. Features that
     # require the full cross-section remain full-universe calculations.

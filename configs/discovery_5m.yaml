@@ -36,6 +36,7 @@ cuda_device: cuda:0
 feature_workers: 16
 feature_build_batch_chunks: 2
 exact_workers: 6
+target_build_batch_chunks: 2
 resume: true
 checkpoint_every_pairs: 25
 primary_target_horizons_minutes: [5, 15, 30, 60, 120]

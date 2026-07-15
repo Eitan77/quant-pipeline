@@ -32,6 +32,11 @@ def test_feature_build_batch_size_must_be_positive():
         ScanConfig(feature_build_batch_chunks=0).validate()
 
 
+def test_target_build_batch_size_must_be_positive():
+    with pytest.raises(ValueError,match="target_build_batch_chunks"):
+        ScanConfig(target_build_batch_chunks=0).validate()
+
+
 def test_empty_confirmation_configuration_does_not_apply_confirmation_fdr():
     frame=pd.DataFrame({"raw_p":[.001,.01],"confirmation_p_value":[.001,.02]})
     result=apply_confirmation_fdr(frame,ScanConfig(use_separate_confirmation_period=False))

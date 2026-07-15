@@ -70,6 +70,19 @@ def test_symbol_worker_builds_multiple_scan_blocks_in_one_pass(tmp_path):
     assert np.isclose(aaa.return_1.iloc[1],expected_second)
 
 
+def test_combined_target_build_matches_separate_batches():
+    cfg=ScanConfig(lookbacks=[1,2],beta_window_sessions=2,beta_min_observations=2)
+    frame,_=build_features(fixture_bars(days=4),cfg,feature_registry(cfg.lookbacks))
+    targets=target_registry([5,15],[5,15])
+    batch_5=[target for target in targets if target.name.startswith("fwd_return_5m")]
+    batch_15=[target for target in targets if target.name.startswith("fwd_return_15m")]
+    combined=add_targets(frame,[*batch_5,*batch_15],"QQQ",cfg)
+    separate_5=add_targets(frame,batch_5,"QQQ",cfg); separate_15=add_targets(frame,batch_15,"QQQ",cfg)
+    for batch,separate in [(batch_5,separate_5),(batch_15,separate_15)]:
+        columns=[target.name for target in batch]+[f"exit_ts__{target.name}" for target in batch if target.classification=="raw"]+[f"exit_close_raw__{target.name}" for target in batch if target.classification=="raw"]+[f"actual_horizon_minutes__{target.name}" for target in batch if target.classification=="raw"]
+        pd.testing.assert_frame_equal(combined[columns],separate[columns])
+
+
 def test_scanner_outputs_fdr_ranking_and_cuda_backend(tmp_path):
     cfg=ScanConfig(lookbacks=[1,2,3,5,10],min_observations=100,min_sessions=2,min_symbols=2,min_bin_observations=5,quantiles=5,checkpoint_every_pairs=1)
     with warnings.catch_warnings():

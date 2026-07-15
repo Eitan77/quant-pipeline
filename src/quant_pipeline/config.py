@@ -57,6 +57,7 @@ class ScanConfig:
     feature_workers: int = 16
     exact_workers: int = 6
     target_chunk_size: int = 4
+    target_build_batch_chunks: int = 2
     resume: bool = True
     checkpoint_every_pairs: int = 25
     normalization_windows_sessions: list[int] = field(default_factory=lambda: [20, 60])
@@ -116,3 +117,4 @@ class ScanConfig:
             raise ValueError("Separate confirmation mode requires selection_end and confirmation_start")
         if any(value<=0 for value in self.recency_half_lives_months):raise ValueError("Recency half-lives must be positive")
         if self.feature_build_batch_chunks<=0:raise ValueError("feature_build_batch_chunks must be positive")
+        if self.target_build_batch_chunks<=0:raise ValueError("target_build_batch_chunks must be positive")
