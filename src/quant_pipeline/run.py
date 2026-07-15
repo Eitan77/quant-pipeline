@@ -18,7 +18,7 @@ from .bulk_scan import cuda_screen, finalize_screen
 from .report import write_reports
 from .table import add_targets, filter_decision_rows, load_canonical_bars, source_provenance, validate_point_in_time
 from .fingerprint import enforce_fingerprint,run_fingerprint
-from .cache import ROW_KEYS,assert_key_alignment,validate_cache,write_cache_metadata
+from .cache import ROW_KEYS,assert_cache_key_alignment,validate_cache,write_cache_metadata
 from .holdout import assert_pre_holdout_frame
 
 
@@ -126,18 +126,19 @@ def execute(config: ScanConfig) -> Path:
         completed_batches += len(target_batches)-len(pending)
         if not pending: continue
         feature_frame=pd.read_parquet(feature_path)
+        for target_path in target_paths:assert_cache_key_alignment(feature_path,target_path)
+        screen_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
+        if not screen_end:raise ValueError("A discovery screen end is required")
+        selection_mask=pd.to_datetime(feature_frame.session_date).le(pd.Timestamp(screen_end))&feature_frame.analysis_eligible.fillna(False)
+        if config.decision_times_et:
+            local=pd.to_datetime(feature_frame.decision_ts,utc=True).dt.tz_convert("America/New_York"); selection_mask&=local.dt.strftime("%H:%M").isin(config.decision_times_et)
+        screen_features=feature_frame.loc[selection_mask].reset_index(drop=True)
         with ThreadPoolExecutor(max_workers=1) as prefetch:
             future=prefetch.submit(pd.read_parquet,target_paths[pending[0]]) if pending else None
             for position,target_index in enumerate(pending):
                 target_batch=target_batches[target_index]; target_frame=future.result()
                 future=prefetch.submit(pd.read_parquet,target_paths[pending[position+1]]) if position+1<len(pending) else None
-                assert_key_alignment(feature_frame,target_frame)
-                screen_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
-                if not screen_end:raise ValueError("A discovery screen end is required")
-                selection_mask=pd.to_datetime(feature_frame.session_date).le(pd.Timestamp(screen_end))&feature_frame.analysis_eligible.fillna(False)
-                if config.decision_times_et:
-                    local=pd.to_datetime(feature_frame.decision_ts,utc=True).dt.tz_convert("America/New_York"); selection_mask&=local.dt.strftime("%H:%M").isin(config.decision_times_et)
-                screen_features=feature_frame.loc[selection_mask].reset_index(drop=True); screen_targets=target_frame.loc[selection_mask].reset_index(drop=True)
+                screen_targets=target_frame.loc[selection_mask].reset_index(drop=True)
                 continuous=[s for s in built if s.classification!="categorical"]
                 results=cuda_screen(screen_features,screen_targets,continuous,[t.name for t in target_batch],config,results,journal)
                 categorical=[s for s in built if s.classification=="categorical"]
@@ -148,7 +149,7 @@ def execute(config: ScanConfig) -> Path:
                 completed_batches+=1
                 (root/"progress.json").write_text(json.dumps({"stage":"cuda_screen","completed_batches":completed_batches,"total_batches":total_batches,"completed_feature_chunks":feature_index,"total_feature_chunks":len(chunks),"completed_pairs":len(results),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
                 del target_frame; gc.collect()
-        del feature_frame; gc.collect()
+        del feature_frame,screen_features; gc.collect()
     results=finalize_screen(results.drop_duplicates(["feature","target"],keep="last")); results.to_csv(checkpoint,index=False)
     if journal.exists(): journal.unlink()
     registry_frame(requested).to_csv(root/"feature_registry.csv",index=False); registry_frame(targets).to_csv(root/"target_registry.csv",index=False); results.to_csv(root/"master_results.csv",index=False)

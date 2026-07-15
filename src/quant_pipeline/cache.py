@@ -46,3 +46,14 @@ def validate_cache(path:Path,fingerprint:str,sealed_holdout_start:str="2026-05-0
 
 def assert_key_alignment(feature_frame:pd.DataFrame,target_frame:pd.DataFrame)->None:
     if len(feature_frame)!=len(target_frame) or row_key_hash(feature_frame)!=row_key_hash(target_frame):raise CacheFingerprintMismatch("Feature and target cache row keys do not align")
+
+
+def assert_cache_key_alignment(feature_path:Path,target_path:Path)->None:
+    """Use already-validated cache metadata instead of rehashing 12M rows per batch."""
+    def metadata(path:Path)->dict:
+        metadata_path=path.with_suffix(path.suffix+".meta.json")
+        if not metadata_path.exists():raise CacheFingerprintMismatch(f"Cache metadata missing: {path}")
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    feature=metadata(feature_path); target=metadata(target_path)
+    if feature.get("row_count")!=target.get("row_count") or feature.get("row_key_hash")!=target.get("row_key_hash"):
+        raise CacheFingerprintMismatch("Feature and target cache metadata keys do not align")

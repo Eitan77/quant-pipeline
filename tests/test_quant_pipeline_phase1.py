@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from quant_pipeline.config import ScanConfig
-from quant_pipeline.bulk_scan import _clustered_inference_from_moments, _pair_moments_stable
+from quant_pipeline.bulk_scan import _clustered_inference_from_moments, _pair_coverage_counts, _pair_moments_stable
 from quant_pipeline.features import build_features
 from quant_pipeline.gpu import CorrelationBackend
 from quant_pipeline.parallel_features import build_parallel_blocks
@@ -117,6 +117,21 @@ def test_batched_clustered_inference_matches_exact_pair_regressions():
             _,expected_se,expected_t,_=_clustered_slope(x[valid,i],y[valid,j],sessions[valid])
             assert np.isclose(se[i,j].item(),expected_se,rtol=1e-10,atol=1e-12)
             assert np.isclose(t[i,j].item(),expected_t,rtol=1e-10,atol=1e-12)
+
+
+def test_batched_pair_coverage_matches_exact_unique_counts():
+    import torch
+
+    finite_x=np.array([[1,1],[1,0],[0,1],[1,1],[1,1],[0,1]],dtype=bool)
+    finite_y=np.array([[1,1],[1,1],[1,0],[0,1],[1,1],[1,1]],dtype=bool)
+    groups={"sessions":np.array([0,0,0,1,1,1]),"symbols":np.array([0,1,0,1,0,1])}
+    device="cuda" if torch.cuda.is_available() else "cpu"
+    actual=_pair_coverage_counts(torch.as_tensor(finite_x,device=device),torch.as_tensor(finite_y,device=device),groups)
+    for name,codes in groups.items():
+        expected=np.zeros((finite_x.shape[1],finite_y.shape[1]),dtype=int)
+        for i in range(finite_x.shape[1]):
+            for j in range(finite_y.shape[1]):expected[i,j]=np.unique(codes[finite_x[:,i]&finite_y[:,j]]).size
+        np.testing.assert_array_equal(actual[name],expected)
 
 
 def test_robust_candidate_status_requires_global_fdr():

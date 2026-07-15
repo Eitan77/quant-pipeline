@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_pipeline.cache import validate_cache,write_cache_metadata
+from quant_pipeline.cache import CacheFingerprintMismatch,assert_cache_key_alignment,validate_cache,write_cache_metadata
 from quant_pipeline.config import ScanConfig
 from quant_pipeline.diagnostics import recent_period_diagnostics,recency_weighted_diagnostics
 from quant_pipeline.report import write_reports
@@ -80,6 +80,15 @@ def test_cache_write_and_resume_reject_may_first(tmp_path):
     path.with_suffix(path.suffix+".meta.json").write_text('{"fingerprint":"fingerprint"}')
     with pytest.raises(ValueError,match="holdout"):
         validate_cache(path,"fingerprint")
+
+
+def test_cache_metadata_alignment_uses_validated_key_hashes(tmp_path):
+    feature=tmp_path/"feature.parquet"; target=tmp_path/"target.parquet"
+    feature.with_suffix(".parquet.meta.json").write_text('{"row_count": 10, "row_key_hash": "same"}')
+    target.with_suffix(".parquet.meta.json").write_text('{"row_count": 10, "row_key_hash": "same"}')
+    assert_cache_key_alignment(feature,target)
+    target.with_suffix(".parquet.meta.json").write_text('{"row_count": 10, "row_key_hash": "different"}')
+    with pytest.raises(CacheFingerprintMismatch):assert_cache_key_alignment(feature,target)
 
 
 def test_report_rejects_holdout_rows(tmp_path):

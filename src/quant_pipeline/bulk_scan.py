@@ -31,7 +31,13 @@ def cuda_screen(
     x_np=feature_frame[feature_names].to_numpy(dtype=np.float32,copy=True); y_np=target_frame[targets].to_numpy(dtype=np.float32,copy=True)
     tx=torch.as_tensor(x_np,device=device); ty=torch.as_tensor(y_np,device=device)
     corr,n,pair_mean_x,pair_mean_y,vx,vy,cov=_pair_moments_stable(tx,ty)
-    cluster_codes=torch.as_tensor(pd.factorize(feature_frame.session_date,sort=False)[0],device=device,dtype=torch.long)
+    session_codes=pd.factorize(feature_frame.session_date,sort=False)[0]
+    symbol_codes=pd.factorize(feature_frame.symbol,sort=False)[0]
+    decisions=feature_frame.decision_ts if "decision_ts" in feature_frame else pd.Series(np.arange(len(feature_frame)),index=feature_frame.index)
+    decision_codes=pd.factorize(decisions,sort=False)[0]
+    years=pd.to_datetime(feature_frame.session_date).dt.year.to_numpy()
+    year_codes=pd.factorize(years,sort=False)[0]
+    cluster_codes=torch.as_tensor(session_codes,device=device,dtype=torch.long)
     cluster_se,cluster_t=_clustered_inference_from_moments(
         tx,ty,cluster_codes,n,pair_mean_x,pair_mean_y,vx,cov
     )
@@ -40,9 +46,11 @@ def cuda_screen(
     sample=np.linspace(0,len(feature_frame)-1,min(len(feature_frame),200_000),dtype=np.int64)
     rx=_percentile_bins(tx,x_np[sample],100); ry=_percentile_bins(ty,y_np[sample],100)
     rank_corr,*_=_pair_moments_stable(rx,ry)
-    decisions=feature_frame.decision_ts if "decision_ts" in feature_frame else pd.Series(np.arange(len(feature_frame)),index=feature_frame.index)
-    session_codes=pd.factorize(feature_frame.session_date,sort=False)[0]; symbol_codes=pd.factorize(feature_frame.symbol,sort=False)[0]; decision_codes=pd.factorize(decisions,sort=False)[0]
-    years=pd.to_datetime(feature_frame.session_date).dt.year.to_numpy(); rows=[]
+    coverage=_pair_coverage_counts(
+        torch.isfinite(tx),torch.isfinite(ty),
+        {"sessions":session_codes,"symbols":symbol_codes,"decisions":decision_codes,"years":year_codes},
+    )
+    rows=[]
     corr=corr.cpu().numpy(); rank_corr=rank_corr.cpu().numpy(); n=n.cpu().numpy(); pair_mean_y=pair_mean_y.cpu().numpy(); vx=vx.cpu().numpy(); vy=vy.cpu().numpy(); cov=cov.cpu().numpy(); cluster_se=cluster_se.cpu().numpy(); cluster_t=cluster_t.cpu().numpy()
     # Aggregate all ten deciles for every target in one scatter operation per
     # feature. This replaces thousands of full-column masks and device syncs.
@@ -62,7 +70,7 @@ def cuda_screen(
         for j,target in enumerate(targets):
             if (spec.name,target) in completed: continue
             count=int(n[i,j])
-            valid=np.isfinite(x_np[:,i])&np.isfinite(y_np[:,j]); sessions=int(np.unique(session_codes[valid]).size); symbols=int(np.unique(symbol_codes[valid]).size); decisions=int(np.unique(decision_codes[valid]).size); valid_years=int(np.unique(years[valid]).size)
+            sessions=int(coverage["sessions"][i,j]); symbols=int(coverage["symbols"][i,j]); decisions=int(coverage["decisions"][i,j]); valid_years=int(coverage["years"][i,j])
             base={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"target_family":target.removesuffix("_benchmark_adjusted"),"table_rows":len(feature_frame),"n":count,"valid_observations":count,"sessions":sessions,"valid_sessions":sessions,"symbols":symbols,"valid_symbols":symbols,"valid_decision_timestamps":decisions,"valid_years":valid_years}
             pair_variance=float(vx[i,j]/max(count,1))
             if not np.isfinite(pair_variance) or pair_variance<1e-14:
@@ -86,6 +94,22 @@ def cuda_screen(
     del tx,ty,rx,ry,cluster_codes
     if device.type=="cuda": torch.cuda.empty_cache()
     return out
+
+
+def _pair_coverage_counts(finite_x,finite_y,group_codes:dict[str,np.ndarray]) -> dict[str,np.ndarray]:
+    """Count distinct valid groups for every feature-target pair on device."""
+    import torch
+    features=finite_x.shape[1]; targets=finite_y.shape[1]; device=finite_x.device
+    codes={name:torch.as_tensor(values,device=device,dtype=torch.long) for name,values in group_codes.items()}
+    sizes={name:int(values.max().item())+1 if values.numel() else 0 for name,values in codes.items()}
+    counts={name:torch.zeros((features,targets),device=device,dtype=torch.int64) for name in codes}
+    for target in range(targets):
+        valid=(finite_x&finite_y[:,target,None]).to(torch.uint8)
+        for name,values in codes.items():
+            seen=torch.zeros((sizes[name],features),device=device,dtype=torch.uint8)
+            seen.scatter_reduce_(0,values[:,None].expand(-1,features),valid,reduce="amax",include_self=True)
+            counts[name][:,target]=seen.sum(0)
+    return {name:values.cpu().numpy() for name,values in counts.items()}
 
 
 def finalize_screen(result: pd.DataFrame) -> pd.DataFrame:
