@@ -88,16 +88,19 @@ def build_features(
         x[f"breakout_magnitude_{n}"]=(x.close/prior_high-1).clip(lower=0); x[f"breakdown_magnitude_{n}"]=(x.close/prior_low-1).clip(upper=0)
         half=max(1,n//2); short_vol=rg.volume.rolling(half,min_periods=half).mean().reset_index(level=[0,1,2],drop=True); short_rv=rg._ret.rolling(half,min_periods=max(1,half)).std().reset_index(level=[0,1,2],drop=True)
         x[f"volume_acceleration_{n}"]=short_vol/x[f"volume_mean_{n}"].replace(0,np.nan)-1; x[f"volatility_acceleration_{n}"]=short_rv/rv.replace(0,np.nan)-1
-        pv=(x.close*x.volume).groupby([x.symbol,x.session_date,x.gap_segment]).rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); vv=rg.volume.rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); x=x.copy(); x[f"rolling_vwap_distance_{n}"]=x.close/(pv/vv.replace(0,np.nan))-1
+        pv=(x.close*x.volume).groupby([x.symbol,x.session_date,x.gap_segment]).rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True); vv=rg.volume.rolling(n,min_periods=n).sum().reset_index(level=[0,1,2],drop=True)
+        if symbol_local:x=x.copy()
+        x[f"rolling_vwap_distance_{n}"]=x.close/(pv/vv.replace(0,np.nan))-1
         x[f"volume_range_ratio_{n}"]=x.volume/(x._range.replace(0,np.nan)); x[f"return_volume_product_{n}"]=x._ret*x.volume; x[f"return_outlier_score_{n}"]=x._ret/rv.replace(0,np.nan)
         if not symbol_local:
             eligible=x.analysis_eligible
             for base in ["return","relative_volume","realized_vol","range_position","return_vol_ratio"]: x[f"{base}_rank_{n}"]=x[f"{base}_{n}"].where(eligible).groupby(x.decision_ts).rank(pct=True)
         for column in set(x.columns)-columns_before:
             if pd.api.types.is_float_dtype(x[column]): x[column]=x[column].astype(np.float32)
-        # Consolidate blocks between lookbacks; otherwise hundreds of scalar
-        # inserts make both construction and later projection much slower.
-        x=x.copy(); g=x.groupby("symbol",sort=False); sg=x.groupby(["symbol","session_date"],sort=False); rg=x.groupby(["symbol","session_date","gap_segment"],sort=False)
+        # Consolidate small symbol shards between lookbacks. A full-universe
+        # consolidation duplicates several GiB at once and can exhaust RAM.
+        if symbol_local:x=x.copy()
+        g=x.groupby("symbol",sort=False); sg=x.groupby(["symbol","session_date"],sort=False); rg=x.groupby(["symbol","session_date","gap_segment"],sort=False)
     total_open=x["open_total_return_adjusted"] if "open_total_return_adjusted" in x else x.open; total_close=x["close_total_return_adjusted"] if "close_total_return_adjusted" in x else x.close
     daily=pd.DataFrame({"symbol":x.symbol,"session_date":x.session_date,"total_open":total_open,"total_close":total_close}).groupby(["symbol","session_date"],sort=False).agg(session_open=("total_open","first"),session_close=("total_close","last"))
     daily["previous_close"]=daily.groupby(level=0).session_close.shift()
