@@ -7,7 +7,7 @@ import pandas as pd
 
 TIMESTAMP_COLUMNS = (
     "session_date", "bar_start_ts", "bar_end_ts", "available_at_ts",
-    "decision_ts", "entry_ts",
+    "decision_ts", "entry_ts", "exit_ts",
 )
 
 

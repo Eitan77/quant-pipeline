@@ -1,0 +1,6 @@
+phase1_run_dir: D:/AlgoResearch/Quant Pipeline/runs/phase1_final_discovery_through_20260430
+output_dir: D:/AlgoResearch/Quant Pipeline/runs/phase2_high_return_baselines_through_20260430
+sealed_holdout_start: '2026-05-01'
+cost_grid_bps: [0, 1, 2, 4, 6, 10]
+first_bar_trial_budget: 50
+session_range_trial_budget: 50
