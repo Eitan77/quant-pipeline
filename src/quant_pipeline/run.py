@@ -48,11 +48,18 @@ def execute(config: ScanConfig) -> Path:
         target_batches.append(raw_batch+[t for t in targets if (t.classification=="benchmark_adjusted" and t.name.removesuffix("_benchmark_adjusted") in names) or (t.classification=="beta_residual" and t.name.removesuffix("_beta_residual") in names)])
     # Materialize each target block once. They are reused by every feature block.
     target_paths=[target_root/f"target_{target_index:03d}.parquet" for target_index in range(len(target_batches))]
-    completed_targets=set()
+    completed_targets=set(); existing_targets=[(index,path) for index,path in enumerate(target_paths) if path.exists()]
+    def validate_indexed_cache(item):
+        index,path=item; return index,validate_cache(path,fingerprint_sha,config.sealed_holdout_start)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=config.cache_validation_workers) as pool:
+        validated_targets=dict(pool.map(validate_indexed_cache,existing_targets))
     for target_index,(target_batch,path) in enumerate(zip(target_batches,target_paths)):
         if not path.exists():continue
-        validate_cache(path,fingerprint_sha,config.sealed_holdout_start); cached=pd.read_parquet(path)
-        record=validate_point_in_time(cached,target_batch,config.sealed_holdout_start); record["batch"]=target_index; validation_records.append(record); del cached
+        saved=validated_targets[target_index]; record=saved.get("point_in_time_validation")
+        if record is None:
+            cached=pd.read_parquet(path); record=validate_point_in_time(cached,target_batch,config.sealed_holdout_start); del cached
+        record=dict(record); record["batch"]=target_index; validation_records.append(record)
         completed_targets.add(target_index)
     target_pending=[index for index in range(len(target_batches)) if index not in completed_targets]
     for start in range(0,len(target_pending),config.target_build_batch_chunks):
@@ -66,7 +73,7 @@ def execute(config: ScanConfig) -> Path:
             identifiers=[*ROW_KEYS,"bar_end_ts","available_at_ts","symbol_role","pit_member","scan_eligible","session_grid_eligible","analysis_eligible","benchmark_valid"]
             target_columns=[*identifiers,"entry_ts","entry_open_raw","beta_at_decision",*[t.name for t in target_batch],*[f"exit_ts__{t.name}" for t in target_batch if t.classification=="raw"],*[f"exit_close_raw__{t.name}" for t in target_batch if t.classification=="raw"],*[f"actual_horizon_minutes__{t.name}" for t in target_batch if t.classification=="raw"]]
             target_columns=[column for column in target_columns if column in target_frame]
-            cached=target_frame.loc[:,target_columns].copy(); cached.to_parquet(path,index=False); write_cache_metadata(path,cached,fingerprint_sha,config.sealed_holdout_start); del cached
+            cached=target_frame.loc[:,target_columns].copy(); cached.to_parquet(path,index=False); write_cache_metadata(path,cached,fingerprint_sha,config.sealed_holdout_start,record); del cached
             completed_targets.add(target_index)
             (root/"progress.json").write_text(json.dumps({"stage":"target_cache","completed":len(completed_targets),"total":len(target_batches),"build_batch":indices,"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
         del target_frame; gc.collect()
@@ -86,9 +93,12 @@ def execute(config: ScanConfig) -> Path:
         built_by_chunk[feature_index]=built; built_names.update(s.name for s in built); completed_features.add(feature_index)
         (root/"progress.json").write_text(json.dumps({"stage":"feature_cache","completed":len(completed_features),"total":len(chunks),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
 
+    existing_features=[(index,path) for index,path in enumerate(feature_paths) if path.exists()]
+    with ThreadPoolExecutor(max_workers=config.cache_validation_workers) as pool:
+        validated_features=set(index for index,_ in pool.map(validate_indexed_cache,existing_features))
     for feature_index,(chunk,path) in enumerate(zip(chunks,feature_paths)):
         if path.exists():
-            validate_cache(path,fingerprint_sha,config.sealed_holdout_start)
+            if feature_index not in validated_features:raise RuntimeError(f"Feature cache was not validated: {path}")
             import pyarrow.parquet as pq
             columns=set(pq.ParquetFile(path).schema.names); built=[s for s in chunk if s.name in columns]
             finish_feature_block(feature_index,built)

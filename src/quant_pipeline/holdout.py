@@ -31,7 +31,8 @@ def assert_pre_holdout_parquet(
     path: Path,
     sealed_holdout_start: str,
     context: str,
-) -> None:
+    verify_key_rows: bool = True,
+) -> pd.DataFrame | None:
     """Check Parquet statistics before loading cached rows, then verify keys."""
     import pyarrow.parquet as pq
 
@@ -51,6 +52,9 @@ def assert_pre_holdout_parquet(
             if maximum >= limit:
                 raise ValueError(f"Sealed holdout cache rejected in {context}: {column}>={sealed_holdout_start}")
 
-    key_columns = [c for c in columns if c in {"session_date", "bar_start_ts", "decision_ts"}]
-    if key_columns:
-        assert_pre_holdout_frame(pd.read_parquet(path, columns=key_columns), sealed_holdout_start, context)
+    key_columns = [c for c in ("symbol","session_date","bar_start_ts","decision_ts") if c in names]
+    if key_columns and verify_key_rows:
+        keys=pd.read_parquet(path,columns=key_columns)
+        assert_pre_holdout_frame(keys,sealed_holdout_start,context)
+        return keys
+    return None

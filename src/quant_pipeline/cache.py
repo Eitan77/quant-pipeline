@@ -22,25 +22,47 @@ def schema_hash(frame:pd.DataFrame)->str:
     return hashlib.sha256(json.dumps([(c,str(t)) for c,t in frame.dtypes.items()]).encode()).hexdigest()
 
 
-def write_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str,sealed_holdout_start:str="2026-05-01")->dict:
+def file_sha256(path:Path,block_size:int=8*1024*1024)->str:
+    digest=hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda:handle.read(block_size),b""):digest.update(block)
+    return digest.hexdigest()
+
+
+def _parquet_schema_hash(path:Path)->str:
+    import pyarrow.parquet as pq
+    parquet=pq.ParquetFile(path)
+    batches=parquet.iter_batches(batch_size=1)
+    try:sample=next(batches).to_pandas()
+    except StopIteration:sample=parquet.schema_arrow.empty_table().to_pandas()
+    return schema_hash(sample)
+
+
+def write_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str,sealed_holdout_start:str="2026-05-01",validation_record:dict|None=None)->dict:
     assert_pre_holdout_frame(frame,sealed_holdout_start,f"cache write {path}")
-    assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache write {path}")
-    persisted=pd.read_parquet(path)
-    if persisted.duplicated(ROW_KEYS).any():raise ValueError(f"Duplicate cache keys: {path}")
-    metadata={"fingerprint":fingerprint,"row_count":len(persisted),"first_key":[str(x) for x in persisted[ROW_KEYS].iloc[0]] if len(persisted) else None,"last_key":[str(x) for x in persisted[ROW_KEYS].iloc[-1]] if len(persisted) else None,"row_key_hash":row_key_hash(persisted),"column_schema_hash":schema_hash(persisted)}
+    persisted_keys=assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache write {path}")
+    if persisted_keys is None or persisted_keys.duplicated(ROW_KEYS).any() or not persisted_keys.sort_values(ROW_KEYS,kind="stable").index.equals(persisted_keys.index):raise ValueError(f"Duplicate, missing, or unsorted cache keys: {path}")
+    expected_hash=row_key_hash(frame); persisted_hash=row_key_hash(persisted_keys)
+    if len(persisted_keys)!=len(frame) or persisted_hash!=expected_hash or _parquet_schema_hash(path)!=schema_hash(frame):raise ValueError(f"Persisted cache does not match source frame: {path}")
+    metadata={"fingerprint":fingerprint,"row_count":len(persisted_keys),"first_key":[str(x) for x in persisted_keys[ROW_KEYS].iloc[0]] if len(persisted_keys) else None,"last_key":[str(x) for x in persisted_keys[ROW_KEYS].iloc[-1]] if len(persisted_keys) else None,"row_key_hash":persisted_hash,"column_schema_hash":schema_hash(frame),"file_size":path.stat().st_size,"file_sha256":file_sha256(path)}
+    if validation_record is not None:metadata["point_in_time_validation"]=validation_record
     path.with_suffix(path.suffix+".meta.json").write_text(json.dumps(metadata,indent=2),encoding="utf-8"); return metadata
 
 
 def validate_cache(path:Path,fingerprint:str,sealed_holdout_start:str="2026-05-01")->dict:
-    assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache resume {path}")
     metadata_path=path.with_suffix(path.suffix+".meta.json")
     if not metadata_path.exists():raise CacheFingerprintMismatch(f"Cache metadata missing: {path}")
     saved=json.loads(metadata_path.read_text(encoding="utf-8"))
     if saved["fingerprint"]!=fingerprint:raise CacheFingerprintMismatch(f"Cache fingerprint mismatch: {path}")
+    if "file_sha256" in saved:
+        if saved.get("file_size")!=path.stat().st_size or saved["file_sha256"]!=file_sha256(path):raise CacheFingerprintMismatch(f"Cache file digest mismatch: {path}")
+        assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache resume {path}",verify_key_rows=False)
+        return saved
+    keys=assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache resume {path}")
     frame=pd.read_parquet(path); current={"row_count":len(frame),"row_key_hash":row_key_hash(frame),"column_schema_hash":schema_hash(frame)}
     assert_pre_holdout_frame(frame,sealed_holdout_start,f"cache resume {path}")
     if any(saved[k]!=current[k] for k in current):raise CacheFingerprintMismatch(f"Cache integrity check failed: {path}")
-    if frame.duplicated(ROW_KEYS).any() or not frame.sort_values(ROW_KEYS,kind="stable").index.equals(frame.index):raise CacheFingerprintMismatch(f"Cache keys are duplicate or unsorted: {path}")
+    if keys is None or keys.duplicated(ROW_KEYS).any() or not keys.sort_values(ROW_KEYS,kind="stable").index.equals(keys.index):raise CacheFingerprintMismatch(f"Cache keys are duplicate or unsorted: {path}")
     return saved
 
 
