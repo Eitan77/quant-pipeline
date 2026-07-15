@@ -33,6 +33,7 @@ benchmark_symbol: QQQ
 experiment_id: phase1_final_discovery_through_20260430
 use_cuda: true
 cuda_device: cuda:0
+cuda_target_batch_group_size: 3
 feature_workers: 16
 feature_build_batch_chunks: 2
 exact_workers: 6

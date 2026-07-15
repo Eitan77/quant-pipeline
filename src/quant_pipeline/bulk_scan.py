@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
 
@@ -12,6 +13,46 @@ from .registry import FeatureSpec
 from .scanner import benjamini_hochberg
 
 
+@dataclass
+class CudaFeatureContext:
+    """Feature-side tensors reused across every target batch in a chunk."""
+    feature_names: tuple[str, ...]
+    device: object
+    tx: object
+    rx: object
+    finite_x: object
+    cluster_codes: object
+    coverage_codes: dict[str, object]
+
+
+def build_cuda_feature_context(
+    feature_frame: pd.DataFrame,
+    features: list[FeatureSpec],
+    config: ScanConfig,
+) -> CudaFeatureContext:
+    import torch
+    active=[s for s in features if s.classification!="categorical" and s.dtype!="categorical"]
+    device=torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
+    names=tuple(s.name for s in active)
+    x_np=feature_frame[list(names)].to_numpy(dtype=np.float32,copy=True)
+    tx=torch.as_tensor(x_np,device=device)
+    session_codes=pd.factorize(feature_frame.session_date,sort=False)[0]
+    symbol_codes=pd.factorize(feature_frame.symbol,sort=False)[0]
+    decisions=feature_frame.decision_ts if "decision_ts" in feature_frame else pd.Series(np.arange(len(feature_frame)),index=feature_frame.index)
+    decision_codes=pd.factorize(decisions,sort=False)[0]
+    years=pd.to_datetime(feature_frame.session_date).dt.year.to_numpy()
+    year_codes=pd.factorize(years,sort=False)[0]
+    codes={
+        "sessions":torch.as_tensor(session_codes,device=device,dtype=torch.long),
+        "symbols":torch.as_tensor(symbol_codes,device=device,dtype=torch.long),
+        "decisions":torch.as_tensor(decision_codes,device=device,dtype=torch.long),
+        "years":torch.as_tensor(year_codes,device=device,dtype=torch.long),
+    }
+    sample=np.linspace(0,len(feature_frame)-1,min(len(feature_frame),200_000),dtype=np.int64)
+    rx=_percentile_bins(tx,x_np[sample],100)
+    return CudaFeatureContext(names,device,tx,rx,torch.isfinite(tx),codes["sessions"],codes)
+
+
 def cuda_screen(
     feature_frame: pd.DataFrame,
     target_frame: pd.DataFrame,
@@ -20,35 +61,32 @@ def cuda_screen(
     config: ScanConfig,
     prior: pd.DataFrame,
     journal: Path,
+    feature_context: CudaFeatureContext | None = None,
 ) -> pd.DataFrame:
     """Vectorized all-pair screen; exact diagnostics are reserved for survivors."""
     completed={(r.feature,r.target) for r in prior.itertuples()} if not prior.empty else set()
     active_features=[s for s in features if s.classification!="categorical" and s.dtype!="categorical" and any((s.name,t) not in completed for t in targets)]
     if not active_features: return prior
     import torch
-    device=torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
     feature_names=[s.name for s in active_features]
-    x_np=feature_frame[feature_names].to_numpy(dtype=np.float32,copy=True); y_np=target_frame[targets].to_numpy(dtype=np.float32,copy=True)
-    tx=torch.as_tensor(x_np,device=device); ty=torch.as_tensor(y_np,device=device)
+    owns_context=feature_context is None
+    context=feature_context or build_cuda_feature_context(feature_frame,active_features,config)
+    if tuple(feature_names)!=context.feature_names:
+        raise ValueError("CUDA feature context does not match the active feature set")
+    device=context.device; tx=context.tx; rx=context.rx
+    y_np=target_frame[targets].to_numpy(dtype=np.float32,copy=True)
+    ty=torch.as_tensor(y_np,device=device)
     corr,n,pair_mean_x,pair_mean_y,vx,vy,cov=_pair_moments_stable(tx,ty)
-    session_codes=pd.factorize(feature_frame.session_date,sort=False)[0]
-    symbol_codes=pd.factorize(feature_frame.symbol,sort=False)[0]
-    decisions=feature_frame.decision_ts if "decision_ts" in feature_frame else pd.Series(np.arange(len(feature_frame)),index=feature_frame.index)
-    decision_codes=pd.factorize(decisions,sort=False)[0]
-    years=pd.to_datetime(feature_frame.session_date).dt.year.to_numpy()
-    year_codes=pd.factorize(years,sort=False)[0]
-    cluster_codes=torch.as_tensor(session_codes,device=device,dtype=torch.long)
     cluster_se,cluster_t=_clustered_inference_from_moments(
-        tx,ty,cluster_codes,n,pair_mean_x,pair_mean_y,vx,cov
+        tx,ty,context.cluster_codes,n,pair_mean_x,pair_mean_y,vx,cov
     )
     # Approximate ranks on a deterministic 200k-row sample. Exact Spearman is
     # recomputed for promoted pairs in the diagnostic pass.
     sample=np.linspace(0,len(feature_frame)-1,min(len(feature_frame),200_000),dtype=np.int64)
-    rx=_percentile_bins(tx,x_np[sample],100); ry=_percentile_bins(ty,y_np[sample],100)
+    ry=_percentile_bins(ty,y_np[sample],100)
     rank_corr,*_=_pair_moments_stable(rx,ry)
     coverage=_pair_coverage_counts(
-        torch.isfinite(tx),torch.isfinite(ty),
-        {"sessions":session_codes,"symbols":symbol_codes,"decisions":decision_codes,"years":year_codes},
+        context.finite_x,torch.isfinite(ty),context.coverage_codes,
     )
     rows=[]
     corr=corr.cpu().numpy(); rank_corr=rank_corr.cpu().numpy(); n=n.cpu().numpy(); pair_mean_y=pair_mean_y.cpu().numpy(); vx=vx.cpu().numpy(); vy=vy.cpu().numpy(); cov=cov.cpu().numpy(); cluster_se=cluster_se.cpu().numpy(); cluster_t=cluster_t.cpu().numpy()
@@ -91,8 +129,10 @@ def cuda_screen(
     if not additions.empty:
         additions.to_csv(journal,mode="a",header=not journal.exists(),index=False)
     out=pd.concat([prior,additions],ignore_index=True)
-    del tx,ty,rx,ry,cluster_codes
-    if device.type=="cuda": torch.cuda.empty_cache()
+    del ty,ry
+    if owns_context:
+        del context
+        if device.type=="cuda": torch.cuda.empty_cache()
     return out
 
 
@@ -100,7 +140,7 @@ def _pair_coverage_counts(finite_x,finite_y,group_codes:dict[str,np.ndarray]) ->
     """Count distinct valid groups for every feature-target pair on device."""
     import torch
     features=finite_x.shape[1]; targets=finite_y.shape[1]; device=finite_x.device
-    codes={name:torch.as_tensor(values,device=device,dtype=torch.long) for name,values in group_codes.items()}
+    codes={name:(values if torch.is_tensor(values) else torch.as_tensor(values,device=device,dtype=torch.long)) for name,values in group_codes.items()}
     sizes={name:int(values.max().item())+1 if values.numel() else 0 for name,values in codes.items()}
     counts={name:torch.zeros((features,targets),device=device,dtype=torch.int64) for name in codes}
     for target in range(targets):

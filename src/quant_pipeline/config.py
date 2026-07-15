@@ -51,6 +51,7 @@ class ScanConfig:
     sector_map_path: str | None = None
     use_cuda: bool = True
     cuda_device: str = "cuda:0"
+    cuda_target_batch_group_size: int = 3
     scan_batch_rows: int = 250_000
     feature_chunk_size: int = 24
     feature_build_batch_chunks: int = 2
@@ -118,3 +119,4 @@ class ScanConfig:
         if any(value<=0 for value in self.recency_half_lives_months):raise ValueError("Recency half-lives must be positive")
         if self.feature_build_batch_chunks<=0:raise ValueError("feature_build_batch_chunks must be positive")
         if self.target_build_batch_chunks<=0:raise ValueError("target_build_batch_chunks must be positive")
+        if self.cuda_target_batch_group_size<=0:raise ValueError("cuda_target_batch_group_size must be positive")

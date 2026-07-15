@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_pipeline.bulk_scan import cuda_screen
+from quant_pipeline.bulk_scan import build_cuda_feature_context,cuda_screen
 from quant_pipeline.config import ScanConfig
 from quant_pipeline.features import build_features
 from quant_pipeline.fingerprint import run_fingerprint
@@ -110,6 +110,16 @@ def test_pairwise_coverage_is_computed_after_missing_values(tmp_path):
     cfg=ScanConfig(use_cuda=False,min_observations=2,min_sessions=2,min_symbols=1,min_decision_timestamps=2,min_years=1)
     result=cuda_screen(feature,target,[FeatureSpec("x","x","test")],["y"],cfg,pd.DataFrame(),tmp_path/"j.csv").iloc[0]
     assert result.valid_observations==6 and result.valid_sessions==3 and result.valid_symbols==2 and result.valid_decision_timestamps==6
+
+
+def test_reused_feature_context_matches_standalone_screen(tmp_path):
+    feature=pd.DataFrame({"session_date":np.repeat(pd.date_range("2021-01-01",periods=6),2),"symbol":["A","B"]*6,"decision_ts":pd.date_range("2021-01-01",periods=12,freq="h"),"x":np.arange(12,dtype=float)})
+    target=pd.DataFrame({"y":np.arange(12,dtype=float)})
+    spec=FeatureSpec("x","x","test"); cfg=ScanConfig(use_cuda=False,min_observations=2,min_sessions=2,min_symbols=1,min_decision_timestamps=2,min_years=1)
+    standalone=cuda_screen(feature,target,[spec],["y"],cfg,pd.DataFrame(),tmp_path/"standalone.csv")
+    context=build_cuda_feature_context(feature,[spec],cfg)
+    reused=cuda_screen(feature,target,[spec],["y"],cfg,pd.DataFrame(),tmp_path/"reused.csv",context)
+    pd.testing.assert_frame_equal(standalone,reused)
 
 
 def test_categorical_features_never_receive_pearson_interpretation():
