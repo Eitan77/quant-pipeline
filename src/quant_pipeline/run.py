@@ -14,7 +14,7 @@ from .features import build_features
 from .parallel_features import build_parallel_blocks, is_symbol_local
 from .registry import feature_registry, registry_frame, target_registry
 from .scanner import benjamini_hochberg,categorical_scan_batch,scan
-from .bulk_scan import build_cuda_feature_context,cuda_screen,finalize_screen
+from .bulk_scan import assert_valid_screen_results,build_cuda_feature_context,cuda_screen,finalize_screen
 from .report import write_reports
 from .table import add_targets, filter_decision_rows, load_canonical_bars, source_provenance, validate_point_in_time
 from .fingerprint import enforce_fingerprint,run_fingerprint
@@ -34,7 +34,7 @@ def execute(config: ScanConfig) -> Path:
     if not bars_cache.exists():
         bars=load_canonical_bars(config); bars.to_parquet(bars_cache,index=False); write_cache_metadata(bars_cache,bars,fingerprint_sha,config.sealed_holdout_start)
     else:validate_cache(bars_cache,fingerprint_sha,config.sealed_holdout_start)
-    checkpoint=root/"screen_checkpoint.csv"; journal=root/"screen_journal.csv"; categorical_journal=root/"categorical_journal.csv"; results=pd.DataFrame(); built_names=set(); validation_records=[]
+    checkpoint=root/"screen_checkpoint.csv"; journal=root/"screen_journal.jsonl"; categorical_journal=root/"categorical_journal.jsonl"; results=pd.DataFrame(); built_names=set(); validation_records=[]
     block_root=root/"blocks"; feature_root=block_root/"features"; target_root=block_root/"targets"; feature_root.mkdir(parents=True,exist_ok=True); target_root.mkdir(parents=True,exist_ok=True)
     eligible=[s for s in requested if s.status=="requested"]
     local_specs=[spec for spec in eligible if is_symbol_local(spec)]
@@ -125,10 +125,11 @@ def execute(config: ScanConfig) -> Path:
     del bars; gc.collect()
     resume_frames=[]
     if config.resume and checkpoint.exists(): resume_frames.append(pd.read_csv(checkpoint))
-    if config.resume and journal.exists(): resume_frames.append(pd.read_csv(journal))
-    if config.resume and categorical_journal.exists(): resume_frames.append(pd.read_csv(categorical_journal))
+    if config.resume and journal.exists(): resume_frames.append(pd.read_json(journal,lines=True))
+    if config.resume and categorical_journal.exists(): resume_frames.append(pd.read_json(categorical_journal,lines=True))
     if resume_frames:
         results=pd.concat(resume_frames,ignore_index=True).drop_duplicates(["feature","target"],keep="last")
+        assert_valid_screen_results(results,"resumed screen journal")
     total_batches=len(chunks)*len(target_batches); completed_batches=0
     from concurrent.futures import ThreadPoolExecutor
     for feature_index,(feature_path,built) in enumerate(zip(feature_paths,built_by_chunk)):
@@ -170,7 +171,9 @@ def execute(config: ScanConfig) -> Path:
                     cat_rows=categorical_scan_batch(combined,categorical,[t.name for t in target_batch],config)
                     completed_pairs={(row.feature,row.target) for row in results.itertuples()}
                     cat_rows=cat_rows.loc[[((row.feature,row.target) not in completed_pairs) for row in cat_rows.itertuples()]]
-                    if not cat_rows.empty:cat_rows.to_csv(categorical_journal,mode="a",header=not categorical_journal.exists(),index=False)
+                    if not cat_rows.empty:
+                        assert_valid_screen_results(cat_rows,"categorical screen batch")
+                        cat_rows.to_json(categorical_journal,orient="records",lines=True,mode="a",double_precision=15)
                     results=pd.concat([results,cat_rows],ignore_index=True).drop_duplicates(["feature","target"],keep="last")
                 completed_batches+=len(indices)
                 (root/"progress.json").write_text(json.dumps({"stage":"cuda_screen","completed_batches":completed_batches,"total_batches":total_batches,"completed_feature_chunks":feature_index,"total_feature_chunks":len(chunks),"completed_pairs":len(results),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
@@ -197,6 +200,7 @@ def execute(config: ScanConfig) -> Path:
     if not exploratory.empty:results=results.merge(exploratory[["feature","target","exploratory_family_fdr"]],on=["feature","target"],how="left")
     else:results["exploratory_family_fdr"]=np.nan
     results["primary_test_count"]=int(primary.raw_p.notna().sum()); results["exploratory_test_count"]=int(exploratory.raw_p.notna().sum()); results.to_csv(root/"master_results.csv",index=False)
+    assert_valid_screen_results(results,"master screen results",check_fdr=True)
     feature_path_by_name={spec.name:feature_paths[index] for index,chunk in enumerate(chunks) for spec in chunk}
     diagnostic_context_path=_build_diagnostic_context(feature_path_by_name,built_names,config,root)
     queue=_cluster_candidates(primary,feature_path_by_name,config,limit=250)
@@ -207,23 +211,38 @@ def execute(config: ScanConfig) -> Path:
     from .exact_parallel import exact_pair
     from .hybrid_exact import gpu_dense_pair
     cpu_rows={}; diagnostic_rows={}; gpu_rows={}; hints={(row.feature,row.target):float(row.spearman) for row in queue.itertuples()}; screen_fdr={(row.feature,row.target):float(row.primary_global_fdr) for row in queue.itertuples()}
-    cpu_done=gpu_done=0
+    exact_root=root/"exact_journal"; cpu_root=exact_root/"cpu"; gpu_root=exact_root/"gpu"; cpu_root.mkdir(parents=True,exist_ok=True); gpu_root.mkdir(parents=True,exist_ok=True)
+    def exact_path(folder,key):
+        digest=hashlib.sha1("\0".join(key).encode()).hexdigest();return folder/f"{digest}.pkl"
+    def save_exact(path,payload):
+        temporary=path.with_suffix(path.suffix+".tmp");pd.to_pickle(payload,temporary);temporary.replace(path)
+    for row in queue.itertuples():
+        key=(row.feature,row.target); cpu_path=exact_path(cpu_root,key); gpu_path=exact_path(gpu_root,key)
+        if cpu_path.exists():
+            payload=pd.read_pickle(cpu_path)
+            if tuple(payload.get("key",()))!=key:raise RuntimeError(f"Exact CPU journal key mismatch: {cpu_path}")
+            cpu_rows[key]=payload["row"];diagnostic_rows[key]=payload["diagnostics"];qtabs[key]=pd.DataFrame(payload["table"])
+        if gpu_path.exists():
+            payload=pd.read_pickle(gpu_path)
+            if tuple(payload.get("key",()))!=key:raise RuntimeError(f"Exact GPU journal key mismatch: {gpu_path}")
+            gpu_rows[key]=payload["dense"]
+    cpu_done=len(cpu_rows);gpu_done=len(gpu_rows)
     with ProcessPoolExecutor(max_workers=config.exact_workers) as cpu_pool, ThreadPoolExecutor(max_workers=1) as gpu_pool:
         futures={}
         for row in queue.itertuples():
             key=(row.feature,row.target); feature_path=feature_path_by_name[row.feature]; target_path=target_path_by_name[row.target]
-            futures[cpu_pool.submit(exact_pair,feature_path,target_path,spec_by_name[row.feature],row.target,config,hints[key],diagnostic_context_path)]=("cpu",key)
+            if key not in cpu_rows:futures[cpu_pool.submit(exact_pair,feature_path,target_path,spec_by_name[row.feature],row.target,config,hints[key],diagnostic_context_path)]=("cpu",key)
             exact_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
-            futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,exact_end)]=("gpu",key)
+            if key not in gpu_rows:futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,exact_end)]=("gpu",key)
         pending=set(futures)
         while pending:
             finished,pending=wait(pending,return_when=FIRST_COMPLETED)
             for future in finished:
                 kind,key=futures[future]
                 if kind=="cpu":
-                    row,table,diagnostics=future.result(); cpu_rows[key]=row; diagnostic_rows[key]=diagnostics; qtabs[key]=pd.DataFrame(table); cpu_done+=1
+                    row,table,diagnostics=future.result(); cpu_rows[key]=row; diagnostic_rows[key]=diagnostics; qtabs[key]=pd.DataFrame(table);save_exact(exact_path(cpu_root,key),{"key":key,"row":row,"table":table,"diagnostics":diagnostics});cpu_done+=1
                 else:
-                    dense,table=future.result(); gpu_rows[key]=dense; gpu_done+=1
+                    dense,table=future.result(); gpu_rows[key]=dense;save_exact(exact_path(gpu_root,key),{"key":key,"dense":dense});gpu_done+=1
             status={"stage":"exact_diagnostics_hybrid","cpu_completed":cpu_done,"gpu_completed":gpu_done,"total":len(queue),"cpu_workers":config.exact_workers,"gpu_workers":1,"updated_at":datetime.now(timezone.utc).isoformat()}
             (root/"progress.json").write_text(json.dumps(status,indent=2),encoding="utf-8"); (root/"detailed_progress.json").write_text(json.dumps(status,indent=2),encoding="utf-8")
     # Preserve the already-selected queue order. Worker completion order must

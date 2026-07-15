@@ -14,7 +14,7 @@ from .gpu import CorrelationBackend
 
 
 def _normal_pvalue(z: float) -> float:
-    return float(1 - erf(abs(z) / sqrt(2)))
+    return float(np.clip(1-erf(abs(z)/sqrt(2)),0,1))
 
 
 def _clustered_slope(x: np.ndarray, y: np.ndarray, clusters: np.ndarray) -> tuple[float, float, float, float]:
@@ -181,7 +181,9 @@ def _outlier_diagnostics(sub:pd.DataFrame,feature:str,target:str,direction:float
 
 
 def benjamini_hochberg(values: pd.Series) -> pd.Series:
-    valid=values.notna(); p=values[valid].to_numpy(); order=np.argsort(p); ranked=p[order]; adj=np.minimum.accumulate((ranked*len(p)/np.arange(1,len(p)+1))[::-1])[::-1]; out=pd.Series(np.nan,index=values.index); out.loc[values[valid].iloc[order].index]=np.minimum(adj,1); return out
+    numeric=pd.to_numeric(values,errors="coerce"); valid=numeric.notna(); p=numeric[valid].to_numpy()
+    if np.any(~np.isfinite(p)) or np.any((p<0)|(p>1)):raise ValueError("Benjamini-Hochberg requires finite p-values in [0, 1]")
+    order=np.argsort(p); ranked=p[order]; adj=np.minimum.accumulate((ranked*len(p)/np.arange(1,len(p)+1))[::-1])[::-1]; out=pd.Series(np.nan,index=values.index); out.loc[numeric[valid].iloc[order].index]=np.minimum(adj,1); return out
 
 
 def _signed_decile_spread(frame:pd.DataFrame,feature:str,target:str)->float:

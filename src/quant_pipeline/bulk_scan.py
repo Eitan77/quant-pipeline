@@ -127,7 +127,8 @@ def cuda_screen(
             rows.append({**base,"mean_target":mean_y,"std_target":sqrt(var_y),"pearson":r,"spearman":float(rank_corr[i,j]),"slope":slope,"cluster_se":float(cluster_se[i,j]),"cluster_t":t,"raw_p":p,"top_bottom_spread":spread,"monotonicity":monotonicity,"shape":shape,"status":"cuda_screened"})
     additions=pd.DataFrame(rows)
     if not additions.empty:
-        additions.to_csv(journal,mode="a",header=not journal.exists(),index=False)
+        assert_valid_screen_results(additions,"CUDA screen batch")
+        additions.to_json(journal,orient="records",lines=True,mode="a",double_precision=15)
     out=pd.concat([prior,additions],ignore_index=True)
     del ty,ry
     if owns_context:
@@ -153,7 +154,26 @@ def _pair_coverage_counts(finite_x,finite_y,group_codes:dict[str,np.ndarray]) ->
 
 
 def finalize_screen(result: pd.DataFrame) -> pd.DataFrame:
-    return _finalize(result)
+    assert_valid_screen_results(result,"screen before FDR")
+    result=_finalize(result)
+    assert_valid_screen_results(result,"screen after FDR",check_fdr=True)
+    return result
+
+
+def assert_valid_screen_results(result:pd.DataFrame,context:str,check_fdr:bool=False)->None:
+    """Fail before promotion when persisted or computed screen statistics are impossible."""
+    if result.empty:return
+    if {"feature","target"}.issubset(result) and result.duplicated(["feature","target"]).any():
+        raise RuntimeError(f"Duplicate feature-target rows in {context}")
+    probability_columns=["raw_p"]
+    if check_fdr:probability_columns += [c for c in ["bh_fdr_p","bh_fdr_p_global","bh_fdr_p_group","primary_global_fdr","family_fdr","cluster_fdr","exploratory_family_fdr"] if c in result]
+    for column in probability_columns:
+        if column not in result:continue
+        values=pd.to_numeric(result[column],errors="coerce").dropna()
+        invalid=values.lt(0)|values.gt(1)|~np.isfinite(values)
+        if invalid.any():raise RuntimeError(f"Invalid probability in {context}: {column}={values.loc[invalid].iloc[0]}")
+    for column in ["n","valid_observations","sessions","valid_sessions","symbols","valid_symbols","valid_decision_timestamps","valid_years"]:
+        if column in result and pd.to_numeric(result[column],errors="coerce").dropna().lt(0).any():raise RuntimeError(f"Negative coverage count in {context}: {column}")
 
 
 def _pair_moments(x,y):

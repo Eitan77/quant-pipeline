@@ -10,7 +10,8 @@ from quant_pipeline.config import ScanConfig
 from quant_pipeline.features import build_features
 from quant_pipeline.exact_parallel import _confirmation_gate,_walk_forward
 from quant_pipeline.registry import FeatureSpec,target_registry
-from quant_pipeline.scanner import _categorical_clustered_test,_cluster_covariance,_cross_sectional_ic,_outlier_diagnostics,_quantiles,_two_way_clustered_covariance
+from quant_pipeline.bulk_scan import assert_valid_screen_results,cuda_screen
+from quant_pipeline.scanner import _categorical_clustered_test,_cluster_covariance,_cross_sectional_ic,_outlier_diagnostics,_quantiles,_two_way_clustered_covariance,benjamini_hochberg
 from quant_pipeline.table import _attach_adjusted_prices,add_targets,apply_analysis_eligibility
 from quant_pipeline.run import _cluster_candidates
 
@@ -74,6 +75,22 @@ def test_fast_categorical_cluster_test_matches_dense_design():
     actual=_categorical_clustered_test(frame,"category","target")
     assert actual["raw_p"]==pytest.approx(wald(date_cov),rel=1e-10,abs=1e-12)
     assert actual["two_way_cluster_p"]==pytest.approx(wald(two_cov),rel=1e-10,abs=1e-12)
+
+
+def test_screen_journal_survives_different_row_schemas(tmp_path):
+    n=24; feature=pd.DataFrame({"session_date":np.repeat(pd.date_range("2021-01-01",periods=12),2),"symbol":["A","B"]*12,"decision_ts":pd.date_range("2021-01-01",periods=n,freq="h"),"constant":1.0,"variable":np.arange(n,dtype=float)});target=pd.DataFrame({"y":np.random.default_rng(9).normal(size=n)})
+    cfg=ScanConfig(use_cuda=False,min_observations=2,min_sessions=2,min_symbols=1,min_decision_timestamps=2,min_years=1);journal=tmp_path/"screen.jsonl"
+    prior=cuda_screen(feature,target,[FeatureSpec("constant","constant","test")],["y"],cfg,pd.DataFrame(),journal)
+    cuda_screen(feature,target,[FeatureSpec("variable","variable","test")],["y"],cfg,prior,journal)
+    persisted=pd.read_json(journal,lines=True).set_index("feature")
+    assert persisted.loc["constant","status"]=="constant_feature"
+    assert 0<=persisted.loc["variable","raw_p"]<=1
+
+
+def test_invalid_probabilities_fail_before_promotion():
+    bad=pd.DataFrame({"feature":["x"],"target":["y"],"raw_p":[-0.1]})
+    with pytest.raises(RuntimeError,match="Invalid probability"):assert_valid_screen_results(bad,"test")
+    with pytest.raises(ValueError,match="\[0, 1\]"):benjamini_hochberg(bad.raw_p)
 
 
 def test_cache_reordering_and_key_mismatch_are_rejected(tmp_path):
