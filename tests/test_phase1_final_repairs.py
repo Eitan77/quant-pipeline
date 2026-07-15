@@ -3,13 +3,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 
 from quant_pipeline.cache import CacheFingerprintMismatch,assert_key_alignment,validate_cache,write_cache_metadata
 from quant_pipeline.config import ScanConfig
 from quant_pipeline.features import build_features
 from quant_pipeline.exact_parallel import _confirmation_gate,_walk_forward
 from quant_pipeline.registry import FeatureSpec,target_registry
-from quant_pipeline.scanner import _categorical_clustered_test,_cross_sectional_ic,_outlier_diagnostics,_quantiles,_two_way_clustered_covariance
+from quant_pipeline.scanner import _categorical_clustered_test,_cluster_covariance,_cross_sectional_ic,_outlier_diagnostics,_quantiles,_two_way_clustered_covariance
 from quant_pipeline.table import _attach_adjusted_prices,add_targets,apply_analysis_eligibility
 from quant_pipeline.run import _cluster_candidates
 
@@ -61,6 +62,18 @@ def test_categorical_cluster_test_resists_duplicate_rows():
     rng=np.random.default_rng(2); base=pd.DataFrame({"session_date":np.repeat(pd.date_range("2024-01-01",periods=30),4),"symbol":np.tile(list("ABCD"),30),"category":np.tile([0,1,0,1],30),"target":rng.normal(size=120)})
     first=_categorical_clustered_test(base,"category","target")["raw_p"]; duplicated=pd.concat([base]*5,ignore_index=True); second=_categorical_clustered_test(duplicated,"category","target")["raw_p"]
     assert abs(first-second)<.02
+
+
+def test_fast_categorical_cluster_test_matches_dense_design():
+    rng=np.random.default_rng(7); n=240
+    frame=pd.DataFrame({"session_date":np.repeat(pd.date_range("2024-01-01",periods=30),8),"symbol":np.tile(list("ABCDEFGH"),30),"category":np.tile([0,1,2,0,1,2,0,1],30),"target":rng.normal(size=n)})
+    design=pd.get_dummies(frame.category,drop_first=True,dtype=float); X=np.column_stack([np.ones(n),design.to_numpy()]); y=frame.target.to_numpy(); beta=np.linalg.pinv(X.T@X)@(X.T@y); residual=y-X@beta
+    date_cov=_cluster_covariance(X,residual,frame.session_date.astype(str).to_numpy()); two_cov=_two_way_clustered_covariance(X,residual,frame.session_date.astype(str).to_numpy(),frame.symbol.astype(str).to_numpy())
+    def wald(cov):
+        b=beta[1:]; v=cov[1:,1:]; return float(stats.chi2.sf(float(b@np.linalg.pinv(v)@b),len(b)))
+    actual=_categorical_clustered_test(frame,"category","target")
+    assert actual["raw_p"]==pytest.approx(wald(date_cov),rel=1e-10,abs=1e-12)
+    assert actual["two_way_cluster_p"]==pytest.approx(wald(two_cov),rel=1e-10,abs=1e-12)
 
 
 def test_cache_reordering_and_key_mismatch_are_rejected(tmp_path):

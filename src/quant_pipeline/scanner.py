@@ -50,14 +50,55 @@ def _two_way_clustered_covariance(X:np.ndarray,residual:np.ndarray,dates:np.ndar
     return _cluster_covariance(X,residual,dates)+_cluster_covariance(X,residual,symbols)-_cluster_covariance(X,residual,intersection)
 
 
-def _categorical_clustered_test(sub:pd.DataFrame,feature:str,target:str)->dict:
-    design=pd.get_dummies(sub[feature],prefix=feature,drop_first=True,dtype=float)
-    if design.shape[1]==0:return {"raw_p":np.nan,"two_way_cluster_p":np.nan,"category_count":sub[feature].nunique()}
-    X=np.column_stack([np.ones(len(sub)),design.to_numpy()]); y=sub[target].to_numpy(float); beta=np.linalg.pinv(X.T@X)@(X.T@y); residual=y-X@beta
-    date_cov=_cluster_covariance(X,residual,sub.session_date.astype(str).to_numpy()); two_cov=_two_way_clustered_covariance(X,residual,sub.session_date.astype(str).to_numpy(),sub.symbol.astype(str).to_numpy())
+def _categorical_clustered_from_codes(category,y,dates,symbols,intersections)->dict:
+    category_count=int(category.max())+1 if len(category) else 0
+    if category_count<=1:return {"raw_p":np.nan,"two_way_cluster_p":np.nan,"category_count":category_count}
+    counts=np.bincount(category,minlength=category_count); sums=np.bincount(category,weights=y,minlength=category_count); means=np.divide(sums,counts,out=np.zeros_like(sums),where=counts>0)
+    beta=np.r_[means[0],means[1:]-means[0]]; residual=y-means[category]
+    xtx=np.zeros((category_count,category_count)); xtx[0,0]=len(y); xtx[0,1:]=counts[1:]; xtx[1:,0]=counts[1:]; xtx[np.arange(1,category_count),np.arange(1,category_count)]=counts[1:]
+    bread=np.linalg.pinv(xtx)
+    def covariance(codes):
+        combined=codes*category_count+category; slots=(int(codes.max())+1)*category_count
+        category_scores=np.bincount(combined,weights=residual,minlength=slots).reshape(-1,category_count)
+        design_scores=np.column_stack((category_scores.sum(axis=1),category_scores[:,1:]))
+        groups=int(np.count_nonzero(np.bincount(codes))); n=len(y); k=category_count
+        correction=(groups/(groups-1))*((n-1)/(n-k)) if groups>1 and n>k else 1.0
+        return correction*bread@(design_scores.T@design_scores)@bread
+    date_cov=covariance(dates); two_cov=date_cov+covariance(symbols)-covariance(intersections)
     def wald(cov):
         b=beta[1:]; v=cov[1:,1:]; statistic=float(b@np.linalg.pinv(v)@b); return float(stats.chi2.sf(statistic,len(b)))
-    return {"raw_p":wald(date_cov),"two_way_cluster_p":wald(two_cov),"category_count":sub[feature].nunique()}
+    return {"raw_p":wald(date_cov),"two_way_cluster_p":wald(two_cov),"category_count":category_count}
+
+
+def _categorical_clustered_test(sub:pd.DataFrame,feature:str,target:str)->dict:
+    category,_=pd.factorize(sub[feature],sort=True); dates,_=pd.factorize(sub.session_date,sort=False); symbols,_=pd.factorize(sub.symbol,sort=False)
+    intersections=dates*(int(symbols.max())+1)+symbols
+    return _categorical_clustered_from_codes(category,sub[target].to_numpy(float),dates,symbols,intersections)
+
+
+def categorical_scan_batch(frame:pd.DataFrame,features:list[FeatureSpec],targets:list[str],config:ScanConfig)->pd.DataFrame:
+    """Exact categorical screen with row-group codes reused across all pairs."""
+    eligible=frame.analysis_eligible.fillna(False).to_numpy() if "analysis_eligible" in frame else np.ones(len(frame),dtype=bool)
+    base=frame.loc[eligible]
+    dates,_=pd.factorize(base.session_date,sort=False); symbols,_=pd.factorize(base.symbol,sort=False); decisions,_=pd.factorize(base.decision_ts,sort=False)
+    years,_=pd.factorize(pd.to_datetime(base.session_date).dt.year,sort=False); intersections=dates*(int(symbols.max())+1)+symbols
+    sector_codes,_=pd.factorize(base.sector,sort=False) if "sector" in base else (None,None)
+    target_values=base[targets].to_numpy(dtype=np.float32,copy=True); rows=[]
+    for spec in features:
+        category,labels=pd.factorize(base[spec.name],sort=True,use_na_sentinel=True)
+        for target_index,target in enumerate(targets):
+            y=target_values[:,target_index]; valid=(category>=0)&np.isfinite(y); count=int(valid.sum())
+            def groups(codes):
+                usable=valid&(codes>=0); return int(np.count_nonzero(np.bincount(codes[usable]))) if usable.any() else 0
+            sessions=groups(dates); valid_symbols=groups(symbols); valid_decisions=groups(decisions); valid_years=groups(years); valid_sectors=groups(sector_codes) if sector_codes is not None else 0
+            row={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"target":target,"table_rows":len(frame),"n":count,"valid_observations":count,"sessions":sessions,"valid_sessions":sessions,"symbols":valid_symbols,"valid_symbols":valid_symbols,"valid_decision_timestamps":valid_decisions,"valid_years":valid_years,"valid_sectors":valid_sectors,"raw_p":np.nan}
+            if count<config.min_observations or sessions<config.min_sessions or valid_symbols<config.min_symbols or valid_decisions<config.min_decision_timestamps or valid_years<config.min_years:
+                rows.append({**row,"status":"insufficient_data"});continue
+            c=category[valid]; values=y[valid]
+            clustered=_categorical_clustered_from_codes(c,values,dates[valid],symbols[valid],intersections[valid])
+            category_counts=np.bincount(c,minlength=len(labels)); category_sums=np.bincount(c,weights=values,minlength=len(labels)); category_means=np.divide(category_sums,category_counts,out=np.full(len(labels),np.nan),where=category_counts>0)
+            rows.append({**row,**clustered,"category_max_minus_min":float(np.nanmax(category_means)-np.nanmin(category_means)),"status":"categorical_screened"})
+    return pd.DataFrame(rows)
 
 
 def _hac_mean(series: pd.Series,max_lag: int|None=None) -> tuple[float,float,float]:

@@ -13,7 +13,7 @@ from .config import ScanConfig
 from .features import build_features
 from .parallel_features import build_parallel_blocks, is_symbol_local
 from .registry import feature_registry, registry_frame, target_registry
-from .scanner import benjamini_hochberg,scan
+from .scanner import benjamini_hochberg,categorical_scan_batch,scan
 from .bulk_scan import build_cuda_feature_context,cuda_screen,finalize_screen
 from .report import write_reports
 from .table import add_targets, filter_decision_rows, load_canonical_bars, source_provenance, validate_point_in_time
@@ -34,7 +34,7 @@ def execute(config: ScanConfig) -> Path:
     if not bars_cache.exists():
         bars=load_canonical_bars(config); bars.to_parquet(bars_cache,index=False); write_cache_metadata(bars_cache,bars,fingerprint_sha,config.sealed_holdout_start)
     else:validate_cache(bars_cache,fingerprint_sha,config.sealed_holdout_start)
-    checkpoint=root/"screen_checkpoint.csv"; journal=root/"screen_journal.csv"; results=pd.DataFrame(); built_names=set(); validation_records=[]
+    checkpoint=root/"screen_checkpoint.csv"; journal=root/"screen_journal.csv"; categorical_journal=root/"categorical_journal.csv"; results=pd.DataFrame(); built_names=set(); validation_records=[]
     block_root=root/"blocks"; feature_root=block_root/"features"; target_root=block_root/"targets"; feature_root.mkdir(parents=True,exist_ok=True); target_root.mkdir(parents=True,exist_ok=True)
     eligible=[s for s in requested if s.status=="requested"]
     local_specs=[spec for spec in eligible if is_symbol_local(spec)]
@@ -126,6 +126,7 @@ def execute(config: ScanConfig) -> Path:
     resume_frames=[]
     if config.resume and checkpoint.exists(): resume_frames.append(pd.read_csv(checkpoint))
     if config.resume and journal.exists(): resume_frames.append(pd.read_csv(journal))
+    if config.resume and categorical_journal.exists(): resume_frames.append(pd.read_csv(categorical_journal))
     if resume_frames:
         results=pd.concat(resume_frames,ignore_index=True).drop_duplicates(["feature","target"],keep="last")
     total_batches=len(chunks)*len(target_batches); completed_batches=0
@@ -166,7 +167,10 @@ def execute(config: ScanConfig) -> Path:
                 results=cuda_screen(screen_features,screen_targets,continuous,[t.name for t in target_batch],config,results,journal,feature_context)
                 if categorical:
                     combined=pd.concat([screen_features.reset_index(drop=True),screen_targets[[t.name for t in target_batch]].reset_index(drop=True)],axis=1)
-                    cat_rows,_=scan(combined,categorical,[t.name for t in target_batch],config,None)
+                    cat_rows=categorical_scan_batch(combined,categorical,[t.name for t in target_batch],config)
+                    completed_pairs={(row.feature,row.target) for row in results.itertuples()}
+                    cat_rows=cat_rows.loc[[((row.feature,row.target) not in completed_pairs) for row in cat_rows.itertuples()]]
+                    if not cat_rows.empty:cat_rows.to_csv(categorical_journal,mode="a",header=not categorical_journal.exists(),index=False)
                     results=pd.concat([results,cat_rows],ignore_index=True).drop_duplicates(["feature","target"],keep="last")
                 completed_batches+=len(indices)
                 (root/"progress.json").write_text(json.dumps({"stage":"cuda_screen","completed_batches":completed_batches,"total_batches":total_batches,"completed_feature_chunks":feature_index,"total_feature_chunks":len(chunks),"completed_pairs":len(results),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
@@ -174,6 +178,7 @@ def execute(config: ScanConfig) -> Path:
         del feature_context,feature_frame,screen_features; gc.collect()
     results=finalize_screen(results.drop_duplicates(["feature","target"],keep="last")); results.to_csv(checkpoint,index=False)
     if journal.exists(): journal.unlink()
+    if categorical_journal.exists():categorical_journal.unlink()
     registry_frame(requested).to_csv(root/"feature_registry.csv",index=False); registry_frame(targets).to_csv(root/"target_registry.csv",index=False); results.to_csv(root/"master_results.csv",index=False)
     skipped=[s.name for s in requested if s.name not in built_names]
     def skip_reason(s):
