@@ -13,8 +13,8 @@ from .config import ScanConfig
 from .features import build_features
 from .parallel_features import build_parallel_blocks, is_symbol_local
 from .registry import feature_registry, registry_frame, target_registry
-from .scanner import benjamini_hochberg,binary_scan_batch,categorical_scan_batch,scan
-from .bulk_scan import assert_valid_screen_results,build_cuda_feature_context,cuda_screen,finalize_screen
+from .scanner import benjamini_hochberg
+from .bulk_scan import assert_valid_screen_results
 from .report import write_reports
 from .table import add_targets, filter_decision_rows, load_canonical_bars, source_provenance, validate_point_in_time
 from .fingerprint import enforce_fingerprint,run_fingerprint
@@ -160,65 +160,8 @@ def execute(config: ScanConfig) -> Path:
     if resume_frames:
         results=pd.concat(resume_frames,ignore_index=True).drop_duplicates(["feature","target"],keep="last")
         assert_valid_screen_results(results,"resumed screen journal")
-    total_batches=len(chunks)*len(target_batches); completed_batches=0
-    from concurrent.futures import ThreadPoolExecutor
-    for feature_index,(feature_path,built) in enumerate(zip(feature_paths,built_by_chunk)):
-        completed_pairs={(row.feature,row.target) for row in results.itertuples()}
-        pending=[i for i,batch in enumerate(target_batches) if any((spec.name,t.name) not in completed_pairs for spec in built for t in batch)]
-        completed_batches += len(target_batches)-len(pending)
-        if not pending: continue
-        feature_frame=pd.read_parquet(feature_path)
-        for target_path in target_paths:assert_cache_key_alignment(feature_path,target_path)
-        screen_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
-        if not screen_end:raise ValueError("A discovery screen end is required")
-        selection_mask=pd.to_datetime(feature_frame.session_date).le(pd.Timestamp(screen_end))&feature_frame.analysis_eligible.fillna(False)
-        if config.decision_times_et:
-            local=pd.to_datetime(feature_frame.decision_ts,utc=True).dt.tz_convert("America/New_York"); selection_mask&=local.dt.strftime("%H:%M").isin(config.decision_times_et)
-        selection_mask=selection_mask.to_numpy()
-        screen_features=feature_frame.loc[selection_mask].reset_index(drop=True)
-        continuous=[s for s in built if s.classification!="categorical" and s.dtype not in {"categorical","binary"}]
-        binary=[s for s in built if s.dtype=="binary"]
-        categorical=[s for s in built if s.classification=="categorical"]
-        feature_context=build_cuda_feature_context(screen_features,continuous,config) if continuous else None
-        target_groups=[pending[i:i+config.cuda_target_batch_group_size] for i in range(0,len(pending),config.cuda_target_batch_group_size)]
-
-        def load_target_group(indices):
-            pieces=[]
-            for target_index in indices:
-                names=[t.name for t in target_batches[target_index]]
-                target_values=pd.read_parquet(target_paths[target_index],columns=names)
-                pieces.append(target_values.loc[selection_mask].reset_index(drop=True))
-            return pd.concat(pieces,axis=1)
-
-        with ThreadPoolExecutor(max_workers=1) as prefetch:
-            future=prefetch.submit(load_target_group,target_groups[0]) if target_groups else None
-            for position,indices in enumerate(target_groups):
-                target_batch=[target for index in indices for target in target_batches[index]]
-                screen_targets=future.result()
-                future=prefetch.submit(load_target_group,target_groups[position+1]) if position+1<len(target_groups) else None
-                results=cuda_screen(screen_features,screen_targets,continuous,[t.name for t in target_batch],config,results,journal,feature_context)
-                if binary:
-                    combined=pd.concat([screen_features.reset_index(drop=True),screen_targets[[t.name for t in target_batch]].reset_index(drop=True)],axis=1)
-                    binary_rows=binary_scan_batch(combined,binary,[t.name for t in target_batch],config)
-                    completed_pairs={(row.feature,row.target) for row in results.itertuples()}
-                    binary_rows=binary_rows.loc[[((row.feature,row.target) not in completed_pairs) for row in binary_rows.itertuples()]]
-                    if not binary_rows.empty:
-                        assert_valid_screen_results(binary_rows,"binary screen batch")
-                        binary_rows.to_json(journal,orient="records",lines=True,mode="a",double_precision=15)
-                    results=pd.concat([results,binary_rows],ignore_index=True).drop_duplicates(["feature","target"],keep="last")
-                if categorical:
-                    combined=pd.concat([screen_features.reset_index(drop=True),screen_targets[[t.name for t in target_batch]].reset_index(drop=True)],axis=1)
-                    cat_rows=categorical_scan_batch(combined,categorical,[t.name for t in target_batch],config)
-                    completed_pairs={(row.feature,row.target) for row in results.itertuples()}
-                    cat_rows=cat_rows.loc[[((row.feature,row.target) not in completed_pairs) for row in cat_rows.itertuples()]]
-                    if not cat_rows.empty:
-                        assert_valid_screen_results(cat_rows,"categorical screen batch")
-                        cat_rows.to_json(categorical_journal,orient="records",lines=True,mode="a",double_precision=15)
-                    results=pd.concat([results,cat_rows],ignore_index=True).drop_duplicates(["feature","target"],keep="last")
-                completed_batches+=len(indices)
-                (root/"progress.json").write_text(json.dumps({"stage":"cuda_screen","completed_batches":completed_batches,"total_batches":total_batches,"completed_feature_chunks":feature_index,"total_feature_chunks":len(chunks),"completed_pairs":len(results),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
-                del screen_targets; gc.collect()
-        del feature_context,feature_frame,screen_features; gc.collect()
+    from .screen_orchestration import screen_feature_blocks_against_target_blocks
+    results=screen_feature_blocks_against_target_blocks(feature_paths=feature_paths,feature_specs_by_path=built_by_chunk,target_paths=target_paths,target_specs_by_path=target_batches,config=config,run_root=root,resume_results=results,journal_path=journal)
     finalized=finalize_phase1_screen(results.drop_duplicates(["feature","target"],keep="last"),feature_registry=requested,target_registry=targets,config=config)
     results=finalized.master;primary=finalized.primary;exploratory=finalized.exploratory
     results.to_csv(checkpoint,index=False)

@@ -61,6 +61,7 @@ def screen_feature_blocks_against_target_blocks(
     config: ScanConfig,
     run_root: Path,
     resume_results: pd.DataFrame | None = None,
+    journal_path: Path | None = None,
 ) -> pd.DataFrame:
     """Screen validated aligned caches without constructing any source data."""
     if len(feature_paths) != len(feature_specs_by_path):
@@ -68,18 +69,21 @@ def screen_feature_blocks_against_target_blocks(
     if len(target_paths) != len(target_specs_by_path):
         raise ValueError("Target path/spec chunk counts differ")
     run_root.mkdir(parents=True, exist_ok=True)
-    journal = run_root / "journals" / "screen_journal.jsonl"
+    journal = journal_path or (run_root / "journals" / "screen_journal.jsonl")
     journal.parent.mkdir(parents=True, exist_ok=True)
     results = _resume(journal) if config.resume else pd.DataFrame()
     if resume_results is not None and not resume_results.empty:
         results = pd.concat([results, resume_results], ignore_index=True).drop_duplicates(
             ["feature", "target"], keep="last"
         )
-    total = len(feature_paths) * len(target_paths)
+    target_groups=[]
+    for start in range(0,len(target_paths),config.cuda_target_batch_group_size):
+        target_groups.append((target_paths[start:start+config.cuda_target_batch_group_size],target_specs_by_path[start:start+config.cuda_target_batch_group_size]))
+    total = len(feature_paths) * len(target_groups)
     completed_batches = 0
     for feature_path, specs in zip(feature_paths, feature_specs_by_path):
         if not specs:
-            completed_batches += len(target_paths)
+            completed_batches += len(target_groups)
             continue
         feature_frame = pd.read_parquet(feature_path)
         screen_end = config.selection_end if config.use_separate_confirmation_period else config.discovery_end
@@ -95,18 +99,22 @@ def screen_feature_blocks_against_target_blocks(
         binary = [item for item in specs if item.dtype == "binary"]
         categorical = [item for item in specs if item.classification == "categorical" or item.dtype == "categorical"]
         context = build_cuda_feature_context(selected_features, continuous, config) if continuous else None
-        for target_path, targets in zip(target_paths, target_specs_by_path):
-            assert_cache_key_alignment(feature_path, target_path)
+        for grouped_paths, grouped_specs in target_groups:
+            for target_path in grouped_paths:assert_cache_key_alignment(feature_path, target_path)
+            targets=[item for chunk in grouped_specs for item in chunk]
             names = [item.name for item in targets]
             completed = {(row.feature, row.target) for row in results.itertuples()}
             if all((spec.name, target) in completed for spec in specs for target in names):
                 completed_batches += 1
                 continue
-            target_values = pd.read_parquet(target_path, columns=names).loc[selection].reset_index(drop=True)
+            target_values = pd.concat([pd.read_parquet(path,columns=[item.name for item in specs]).loc[selection].reset_index(drop=True) for path,specs in zip(grouped_paths,grouped_specs)],axis=1)
             prior_count = len(results)
+            completed = {(row.feature, row.target) for row in results.itertuples()}
+            pending_continuous=[spec for spec in continuous if any((spec.name,name) not in completed for name in names)]
+            active_context=context if context is not None and tuple(spec.name for spec in pending_continuous)==context.feature_names else (build_cuda_feature_context(selected_features,pending_continuous,config) if pending_continuous else None)
             results = cuda_screen(
-                selected_features, target_values, continuous, names, config,
-                results, journal, context,
+                selected_features, target_values, pending_continuous, names, config,
+                results, journal, active_context,
             )
             combined = pd.concat([selected_features, target_values], axis=1)
             for scanner in (binary_scan_batch, categorical_scan_batch):
