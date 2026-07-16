@@ -218,7 +218,9 @@ def run_phase1b(source_run: str | Path, config: ScanConfig) -> Path:
     def build_and_screen(compiled,build_config,output,cache_name,primary_only=False):
         if not compiled:return [],[],[],pd.DataFrame()
         _atomic_json({"plan_hash":plan_hash(list(compiled)),"features":[{"definition":item.definition,"spec":item.spec} for item in compiled]},output/"compiled_feature_plan.json")
-        paths,chunks,feature_coverage=build_dual_feature_chunks(list(compiled),source.feature_cache_index,build_config,root/cache_name,fingerprint["sha256"])
+        coverage_path=output/"feature_coverage.csv"
+        resume_coverage=pd.read_csv(coverage_path) if config.resume and coverage_path.exists() else None
+        paths,chunks,feature_coverage=build_dual_feature_chunks(list(compiled),source.feature_cache_index,build_config,root/cache_name,fingerprint["sha256"],resume_coverage)
         _atomic_csv(pd.DataFrame(feature_coverage),output/"feature_coverage.csv");_atomic_csv(registry_frame([item.spec for item in compiled]),output/"feature_registry.csv");write_registry_json([item.spec for item in compiled],output/"feature_registry.json")
         if compiled and not sum(map(len,chunks)):raise RuntimeError(f"{output.name} compiled features, but none passed construction and coverage")
         targets=[item for item in source.target_registry if not primary_only or item.tier=="primary"]

@@ -196,11 +196,30 @@ def binary_build_status(metrics: dict, config: ScanConfig) -> tuple[str,str|None
     return build_status(BinaryCoverage(**metrics),config)
 
 
-def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_by_name: dict[str, Path], config: ScanConfig, output_root: Path, fingerprint_sha: str) -> tuple[list[Path], list[list[FeatureSpec]], list[dict]]:
+def build_dual_feature_chunks(
+    compiled: list[CompiledDualFeature],
+    feature_path_by_name: dict[str, Path],
+    config: ScanConfig,
+    output_root: Path,
+    fingerprint_sha: str,
+    resume_coverage: pd.DataFrame | None = None,
+) -> tuple[list[Path], list[list[FeatureSpec]], list[dict]]:
     """Create resume-safe Phase 1B cache chunks from aligned base caches."""
     output_root.mkdir(parents=True, exist_ok=True)
     chunks = [compiled[i:i + config.dual_factor_feature_chunk_size] for i in range(0, len(compiled), config.dual_factor_feature_chunk_size)]
-    paths: list[Path] = []; specs_by_chunk: list[list[FeatureSpec]] = []; coverage: list[dict] = []
+    paths = [output_root / f"dual_{index:03d}.parquet" for index in range(len(chunks))]
+    specs_by_chunk: list[list[FeatureSpec]] = []; coverage: list[dict] = []
+    coverage_by_feature = {
+        str(row["feature"]): row
+        for row in (resume_coverage.to_dict("records") if resume_coverage is not None else [])
+    }
+    resumable_paths = [
+        path for path, chunk in zip(paths, chunks)
+        if path.exists() and all(item.spec.name in coverage_by_feature for item in chunk)
+    ]
+    if resumable_paths:
+        with ThreadPoolExecutor(max_workers=min(4, len(resumable_paths))) as executor:
+            list(executor.map(lambda path: validate_cache(path, fingerprint_sha, config.sealed_holdout_start), resumable_paths))
     memo: dict[Path, pd.DataFrame] = {}
     rank_memo: dict[str, np.ndarray] = {}
     group_codes: tuple[np.ndarray,np.ndarray,np.ndarray]|None = None
@@ -214,8 +233,13 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
             memo[path]=pd.read_parquet(path,columns=columns)
         return memo[path]
     for index, chunk in enumerate(chunks):
-        path = output_root / f"dual_{index:03d}.parquet"; specs = [item.spec for item in chunk]
-        paths.append(path); specs_by_chunk.append(specs)
+        path = paths[index]; specs = [item.spec for item in chunk]
+        specs_by_chunk.append(specs)
+        if path in resumable_paths:
+            records = [coverage_by_feature[spec.name] for spec in specs]
+            coverage.extend(records)
+            specs_by_chunk[-1] = [spec for spec, record in zip(specs, records) if record.get("status") == "built"]
+            continue
         if path.exists():
             validate_cache(path, fingerprint_sha, config.sealed_holdout_start)
             frame = pd.read_parquet(path)
