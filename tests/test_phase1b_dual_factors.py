@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_pipeline.config import ScanConfig
-from quant_pipeline.dual_features import _materialize
+from quant_pipeline.dual_features import _materialize, centered_oriented_rank, eligible_cross_sectional_rank
 from quant_pipeline.dual_registry import compile_dual_plan, plan_hash
 from quant_pipeline.effects import effect_value, feature_scan_kind
 from quant_pipeline.registry import FeatureSpec, feature_registry
@@ -25,8 +26,8 @@ def test_dual_intersection_keeps_missing_as_missing():
     config=ScanConfig(dual_factor_enabled=True,dual_factor_manifest_path="configs/phase1b_dual_factors.yaml")
     item=compile_dual_plan(config.dual_factor_manifest_path,feature_registry(config.lookbacks),config)[0]
     timestamp=pd.Timestamp("2026-04-01 14:35",tz="UTC")
-    frame=pd.DataFrame({"symbol":["A","B","C"],"session_date":["2026-04-01"]*3,"decision_ts":[timestamp]*3,"session_range_position":[1.,.2,np.nan],"tod_relative_volume_20":[2.,.2,2.]})
-    result=_materialize(frame,item)
+    frame=pd.DataFrame({"symbol":["A","B","C"],"session_date":["2026-04-01"]*3,"decision_ts":[timestamp]*3,"analysis_eligible":True,"session_range_position":[1.,.2,np.nan],"tod_relative_volume_20":[2.,.2,2.]})
+    result=_materialize(frame,item,ScanConfig(cross_sectional_min_symbols=2))
     assert result.tolist()[:2]==[1.0,0.0]
     assert np.isnan(result.iloc[2])
 
@@ -42,7 +43,7 @@ def test_binary_screen_reports_exact_on_minus_off_effect():
     spec=FeatureSpec("signal","", "test", dtype="binary")
     dates=pd.date_range("2025-01-01",periods=8,freq="D")
     frame=pd.DataFrame({"signal":[0,1]*8,"target":[-.0005,.001]*8,"session_date":np.repeat(dates,2),"symbol":["A","B"]*8,"decision_ts":pd.date_range("2025-01-01",periods=16,freq="5min",tz="UTC"),"analysis_eligible":True})
-    config=ScanConfig(min_observations=4,min_sessions=2,min_symbols=2,min_decision_timestamps=2,min_years=1)
+    config=ScanConfig(min_observations=4,min_sessions=2,min_symbols=2,min_decision_timestamps=2,min_years=1,binary_min_on_observations=2,binary_min_off_observations=2,binary_min_on_sessions=2,binary_min_off_sessions=2,binary_min_on_symbols=1,binary_min_off_symbols=1)
     result=binary_scan_batch(frame,[spec],["target"],config).iloc[0]
     assert result["scan_kind"]=="binary"
     assert np.isclose(result["top_bottom_spread"],.0015)
@@ -52,7 +53,7 @@ def test_binary_screen_reports_exact_on_minus_off_effect():
 def test_exact_binary_scan_does_not_construct_deciles():
     spec=FeatureSpec("signal","", "test", dtype="binary")
     frame=pd.DataFrame({"signal":[0,1]*8,"target":[-.0005,.001]*8,"session_date":np.repeat(pd.date_range("2025-01-01",periods=8,freq="D"),2),"symbol":["A","B"]*8,"decision_ts":pd.date_range("2025-01-01",periods=16,freq="5min",tz="UTC"),"analysis_eligible":True})
-    config=ScanConfig(min_observations=4,min_sessions=2,min_symbols=2,min_decision_timestamps=2,min_years=1,use_cuda=False)
+    config=ScanConfig(min_observations=4,min_sessions=2,min_symbols=2,min_decision_timestamps=2,min_years=1,use_cuda=False,binary_min_on_observations=2,binary_min_off_observations=2,binary_min_on_sessions=2,binary_min_off_sessions=2,binary_min_on_symbols=1,binary_min_off_symbols=1)
     result,tables=scan(frame,[spec],["target"],config)
     assert result.iloc[0]["effect_kind"]=="binary_on_minus_off"
     assert list(tables[("signal","target")]["signal"]) == [0,1]
@@ -62,3 +63,25 @@ def test_production_yaml_loads_with_phase1b_fields():
     config=ScanConfig.from_yaml("configs/discovery_5m.yaml")
     assert not config.dual_factor_enabled
     assert config.discovery_end=="2026-04-30"
+
+
+def test_cross_sectional_rank_excludes_ineligible_extremes_and_small_groups():
+    ts=pd.Timestamp("2026-04-01 14:35",tz="UTC")
+    frame=pd.DataFrame({"session_date":["2026-04-01"]*4,"decision_ts":[ts]*4,"analysis_eligible":[True,True,False,True]})
+    rank=eligible_cross_sectional_rank(frame,pd.Series([1.,2.,999.,2.]),min_symbols=3)
+    assert np.isclose(rank.iloc[0],1/3) and np.isclose(rank.iloc[1],5/6)
+    assert np.isnan(rank.iloc[2])
+    assert eligible_cross_sectional_rank(frame,pd.Series([1.,2.,999.,2.]),min_symbols=4).isna().all()
+
+
+def test_centered_orientation_is_bounded_and_symmetric():
+    rank=pd.Series([.1,.5,.9])
+    assert np.allclose(centered_oriented_rank(rank,1),[-.8,0,.8])
+    assert np.allclose(centered_oriented_rank(rank,-1),[.8,0,-.8])
+
+
+def test_manifest_rejects_invalid_definition_before_data_access(tmp_path):
+    path=tmp_path/"bad.yaml"
+    path.write_text("schema_version: phase1b_manifest_v1\ndefinitions:\n  - id: bad\n    feature_a: session_range_position\n    feature_b: tod_relative_volume_20\n    operator: intersection\n    condition_a: {transform: raw, comparator: nope, threshold: 1}\n    condition_b: {transform: raw, comparator: eq, threshold: 1}\n",encoding="utf-8")
+    with pytest.raises(ValueError,match="Invalid dual condition"):
+        compile_dual_plan(path,feature_registry(ScanConfig().lookbacks),ScanConfig())

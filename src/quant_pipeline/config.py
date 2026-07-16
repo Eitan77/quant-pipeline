@@ -114,6 +114,13 @@ class ScanConfig:
     binary_semantics_validation: str = "error"
     scan_schema_version: str = "phase1ab_v2"
     dual_cache_schema_version: str = "phase1b_v2"
+    binary_min_on_observations: int = 100
+    binary_min_off_observations: int = 100
+    binary_min_on_sessions: int = 50
+    binary_min_off_sessions: int = 50
+    binary_min_on_symbols: int = 10
+    binary_min_off_symbols: int = 10
+    bar_interval_minutes: int = 5
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ScanConfig":
@@ -145,3 +152,4 @@ class ScanConfig:
             raise ValueError("dual-factor activation-rate bounds must satisfy 0 <= min < max <= 1")
         if self.binary_semantics_validation not in {"error", "warn", "off"}:
             raise ValueError("binary_semantics_validation must be error, warn, or off")
+        if self.bar_interval_minutes<=0:raise ValueError("bar_interval_minutes must be positive")

@@ -87,3 +87,10 @@ dual_factor_max_activation_rate: 0.9995
 binary_semantics_validation: error
 scan_schema_version: phase1ab_v2
 dual_cache_schema_version: phase1b_v2
+binary_min_on_observations: 100
+binary_min_off_observations: 100
+binary_min_on_sessions: 50
+binary_min_off_sessions: 50
+binary_min_on_symbols: 10
+binary_min_off_symbols: 10
+bar_interval_minutes: 5

@@ -117,11 +117,18 @@ def binary_scan_batch(frame: pd.DataFrame, features: list[FeatureSpec], targets:
             if count<config.min_observations or sessions<config.min_sessions or symbols<config.min_symbols or decisions<config.min_decision_timestamps or years<config.min_years:
                 rows.append({**row,"status":"insufficient_data"}); continue
             on=sub.loc[sub.x.eq(1),"y"]; off=sub.loc[sub.x.eq(0),"y"]
+            def state_coverage(state: int) -> dict:
+                part=sub.loc[sub.x.eq(state)]
+                return {f"signal_{'on' if state else 'off'}_{name}":int(part[column].nunique()) for name,column in (("sessions","session_date"),("symbols","symbol"),("decision_timestamps","decision_ts"))}
+            on_coverage=state_coverage(1); off_coverage=state_coverage(0)
             if not len(on) or not len(off):
                 rows.append({**row,"status":"constant_feature"}); continue
+            pair_ok=(len(on)>=config.binary_min_on_observations and len(off)>=config.binary_min_off_observations and on_coverage["signal_on_sessions"]>=config.binary_min_on_sessions and off_coverage["signal_off_sessions"]>=config.binary_min_off_sessions and on_coverage["signal_on_symbols"]>=config.binary_min_on_symbols and off_coverage["signal_off_symbols"]>=config.binary_min_off_symbols)
+            if not pair_ok:
+                rows.append({**row,"signal_on_count":int(len(on)),"signal_off_count":int(len(off)),**on_coverage,**off_coverage,"status":"insufficient_data"}); continue
             slope,se,t,p=_clustered_slope(sub.x.to_numpy(float),sub.y.to_numpy(float),sub.session_date.astype(str).to_numpy())
             pearson=float(sub.x.corr(sub.y)); spearman=float(sub.x.corr(sub.y,method="spearman"))
-            rows.append({**row,"on_count":int(len(on)),"off_count":int(len(off)),"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(sub.y.mean()),"median_target":float(sub.y.median()),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"raw_p":p,"top_bottom_spread":slope,"monotonicity":np.nan,"shape":"binary_positive" if slope>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":slope,"status":"binary_screened"})
+            rows.append({**row,"on_count":int(len(on)),"off_count":int(len(off)),"signal_on_count":int(len(on)),"signal_off_count":int(len(off)),**on_coverage,**off_coverage,"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(sub.y.mean()),"median_target":float(sub.y.median()),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"raw_p":p,"top_bottom_spread":slope,"monotonicity":np.nan,"shape":"binary_positive" if slope>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":slope,"status":"binary_screened"})
     return pd.DataFrame(rows)
 
 
