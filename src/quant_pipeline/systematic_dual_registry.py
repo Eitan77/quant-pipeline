@@ -167,31 +167,54 @@ def select_systematic_parents(
     return tuple(selected), tuple(ledger)
 
 
-def _parent_frame(parent: SystematicParent, paths: dict[str, Path], memo: dict[Path, pd.DataFrame]) -> pd.DataFrame:
-    path = paths[parent.feature]
-    if path not in memo:
-        memo[path] = pd.read_parquet(path)
-    frame = memo[path]
-    keep = [name for name in ("session_date", "decision_ts", "symbol", "analysis_eligible", parent.feature) if name in frame]
-    return frame[keep]
+def _load_pair_inputs(parents: tuple[SystematicParent, ...], paths: dict[str, Path]):
+    """Load only validity masks and a deterministic correlation sample.
+
+    Pair construction never needs all parent values resident as float64.  The
+    dense boolean matrix is about one eighth the size and identical missingness
+    patterns share one cached joint-coverage calculation.
+    """
+    ordered=tuple(sorted(parents,key=lambda item:item.feature));first=paths[ordered[0].feature]
+    keys=pd.read_parquet(first,columns=["session_date","decision_ts","symbol","analysis_eligible"])
+    eligible=keys.analysis_eligible.fillna(False).to_numpy(dtype=bool,copy=False);n=len(keys)
+    codes=[]
+    for column in ("session_date","symbol","decision_ts"):
+        code,_=pd.factorize(keys[column],sort=False);codes.append(code.astype(np.int32,copy=False))
+    del keys
+    sample_index=np.arange(0,n,max(1,n//20_000),dtype=np.int64)[:20_000]
+    valid=np.empty((len(ordered),n),dtype=bool);sample=np.full((len(ordered),len(sample_index)),np.nan,dtype=np.float64)
+    position={parent.feature:index for index,parent in enumerate(ordered)};by_path:dict[Path,list[str]]={}
+    for parent in ordered:by_path.setdefault(paths[parent.feature],[]).append(parent.feature)
+    for path,names in sorted(by_path.items(),key=lambda item:str(item[0])):
+        frame=pd.read_parquet(path,columns=sorted(names))
+        for name in sorted(names):
+            values=pd.to_numeric(frame[name],errors="coerce").to_numpy(copy=False);index=position[name]
+            valid[index]=eligible&np.isfinite(values);sample[index]=values[sample_index]
+        del frame
+    packed=np.packbits(valid,axis=1)
+    mask_ids=[hashlib.sha1(packed[index].tobytes()).hexdigest() for index in range(len(ordered))]
+    return ordered,position,valid,sample,tuple(codes),mask_ids
 
 
 def generate_systematic_pairs(parents: tuple[SystematicParent, ...], feature_cache_index: dict[str, Path], config: ScanConfig) -> tuple[tuple[SystematicPair, ...], tuple[dict[str, Any], ...]]:
     cfg = config.systematic_phase1b.pair_generation
-    memo: dict[Path, pd.DataFrame] = {}; accepted: list[SystematicPair] = []; ledger: list[dict[str, Any]] = []
-    for left, right in combinations(sorted(parents, key=lambda item: item.feature), 2):
+    if len(parents)<2:return (),()
+    ordered,position,valid_matrix,samples,group_codes,mask_ids=_load_pair_inputs(parents,feature_cache_index)
+    coverage_cache:dict[tuple[str,str],tuple[int,int,int,int]]={};accepted: list[SystematicPair] = []; ledger: list[dict[str, Any]] = []
+    for left, right in combinations(ordered, 2):
         common = {"feature_a": left.feature, "feature_b": right.feature, "family_a": left.feature_family, "family_b": right.feature_family, "redundancy_group_a": left.redundancy_group, "redundancy_group_b": right.redundancy_group, "parent_a_score": left.parent_score, "parent_b_score": right.parent_score}
         if cfg.forbid_same_redundancy_group and left.redundancy_group and left.redundancy_group == right.redundancy_group:
             ledger.append({**common, "selected": False, "rejection_reason": "same_redundancy_group"}); continue
-        a, b = _parent_frame(left, feature_cache_index, memo), _parent_frame(right, feature_cache_index, memo)
-        if len(a) != len(b): raise ValueError("Systematic parent caches are not row aligned")
-        av = pd.to_numeric(a[left.feature], errors="coerce"); bv = pd.to_numeric(b[right.feature], errors="coerce")
-        eligible = a.get("analysis_eligible", pd.Series(True, index=a.index)).fillna(False).astype(bool) & b.get("analysis_eligible", pd.Series(True, index=b.index)).fillna(False).astype(bool)
-        valid = eligible & av.notna() & bv.notna() & np.isfinite(av) & np.isfinite(bv)
-        idx = np.flatnonzero(valid.to_numpy()); sampled = idx[::max(1, len(idx) // 20_000)][:20_000]
-        corr = float(av.iloc[sampled].corr(bv.iloc[sampled], method="spearman")) if len(sampled) > 1 else np.nan
-        joint = a.loc[valid]
-        observations = int(valid.sum()); sessions = int(joint.session_date.nunique()); symbols = int(joint.symbol.nunique()); decisions = int(joint.decision_ts.nunique())
+        ia,ib=position[left.feature],position[right.feature];av,bv=samples[ia],samples[ib];sample_valid=np.isfinite(av)&np.isfinite(bv)
+        corr=float(pd.Series(av[sample_valid]).corr(pd.Series(bv[sample_valid]),method="spearman")) if sample_valid.sum()>1 else np.nan
+        mask_key=tuple(sorted((mask_ids[ia],mask_ids[ib])))
+        if mask_key not in coverage_cache:
+            joint=valid_matrix[ia]&valid_matrix[ib];observations=int(np.count_nonzero(joint))
+            counts=[]
+            for codes in group_codes:
+                counts.append(int(np.count_nonzero(np.bincount(codes[joint],minlength=int(codes.max())+1))))
+            coverage_cache[mask_key]=(observations,*counts)
+        observations,sessions,symbols,decisions=coverage_cache[mask_key]
         values = {**common, "sampled_parent_spearman": corr, "joint_valid_observations": observations, "joint_sessions": sessions, "joint_symbols": symbols, "joint_decision_timestamps": decisions}
         if np.isfinite(corr) and abs(corr) >= cfg.maximum_absolute_parent_spearman: reason = "parent_correlation"
         elif observations < cfg.minimum_joint_observations: reason = "insufficient_joint_observations"
