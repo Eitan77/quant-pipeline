@@ -27,6 +27,7 @@ dev = ["pytest>=8.0.0"]
 
 [project.scripts]
 quant-pipeline = "quant_pipeline_launcher:main"
+quant-pipeline-phase1b = "quant_pipeline_phase1b_launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

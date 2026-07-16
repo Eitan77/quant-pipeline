@@ -46,7 +46,7 @@ def write_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str,sealed_hol
     if len(persisted_keys)!=len(frame) or persisted_hash!=expected_hash or _parquet_schema_hash(path)!=schema_hash(frame):raise ValueError(f"Persisted cache does not match source frame: {path}")
     metadata={"fingerprint":fingerprint,"row_count":len(persisted_keys),"first_key":[str(x) for x in persisted_keys[ROW_KEYS].iloc[0]] if len(persisted_keys) else None,"last_key":[str(x) for x in persisted_keys[ROW_KEYS].iloc[-1]] if len(persisted_keys) else None,"row_key_hash":persisted_hash,"column_schema_hash":schema_hash(frame),"file_size":path.stat().st_size,"file_sha256":file_sha256(path)}
     if validation_record is not None:metadata["point_in_time_validation"]=validation_record
-    path.with_suffix(path.suffix+".meta.json").write_text(json.dumps(metadata,indent=2),encoding="utf-8"); return metadata
+    metadata_path=path.with_suffix(path.suffix+".meta.json");temporary=metadata_path.with_suffix(metadata_path.suffix+".tmp");temporary.write_text(json.dumps(metadata,indent=2),encoding="utf-8");temporary.replace(metadata_path); return metadata
 
 
 def validate_cache(path:Path,fingerprint:str,sealed_holdout_start:str="2026-05-01")->dict:

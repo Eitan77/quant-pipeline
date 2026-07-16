@@ -12,6 +12,7 @@ from .config import ScanConfig
 from .registry import FeatureSpec
 from .gpu import CorrelationBackend
 from .effects import feature_scan_kind
+from .binary_coverage import binary_coverage, pair_status
 
 
 def _normal_pvalue(z: float) -> float:
@@ -104,6 +105,8 @@ def categorical_scan_batch(frame:pd.DataFrame,features:list[FeatureSpec],targets
 
 def binary_scan_batch(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], config: ScanConfig) -> pd.DataFrame:
     """Exact binary on/off screen; binary values are never quantile binned."""
+    if config.binary_primary_screen_inference != "two_way_date_symbol":
+        raise ValueError("Binary screening may not silently fall back from two-way inference")
     eligible=frame.analysis_eligible.fillna(False).to_numpy() if "analysis_eligible" in frame else np.ones(len(frame),dtype=bool)
     base=frame.loc[eligible]; rows=[]
     for spec in features:
@@ -117,18 +120,15 @@ def binary_scan_batch(frame: pd.DataFrame, features: list[FeatureSpec], targets:
             if count<config.min_observations or sessions<config.min_sessions or symbols<config.min_symbols or decisions<config.min_decision_timestamps or years<config.min_years:
                 rows.append({**row,"status":"insufficient_data"}); continue
             on=sub.loc[sub.x.eq(1),"y"]; off=sub.loc[sub.x.eq(0),"y"]
-            def state_coverage(state: int) -> dict:
-                part=sub.loc[sub.x.eq(state)]
-                return {f"signal_{'on' if state else 'off'}_{name}":int(part[column].nunique()) for name,column in (("sessions","session_date"),("symbols","symbol"),("decision_timestamps","decision_ts"))}
-            on_coverage=state_coverage(1); off_coverage=state_coverage(0)
+            coverage=binary_coverage(base,spec.name,target); coverage_fields=coverage.as_dict(); coverage_status,coverage_reason=pair_status(coverage,config)
             if not len(on) or not len(off):
                 rows.append({**row,"status":"constant_feature"}); continue
-            pair_ok=(len(on)>=config.binary_min_on_observations and len(off)>=config.binary_min_off_observations and on_coverage["signal_on_sessions"]>=config.binary_min_on_sessions and off_coverage["signal_off_sessions"]>=config.binary_min_off_sessions and on_coverage["signal_on_symbols"]>=config.binary_min_on_symbols and off_coverage["signal_off_symbols"]>=config.binary_min_off_symbols)
-            if not pair_ok:
-                rows.append({**row,"signal_on_count":int(len(on)),"signal_off_count":int(len(off)),**on_coverage,**off_coverage,"status":"insufficient_data"}); continue
+            if coverage_status!="sufficient":
+                rows.append({**row,**coverage_fields,"coverage_reason":coverage_reason,"status":"insufficient_data"}); continue
             slope,se,t,p=_clustered_slope(sub.x.to_numpy(float),sub.y.to_numpy(float),sub.session_date.astype(str).to_numpy())
+            two_way_se,two_way_t,two_way_p=_two_way_clustered_slope(sub.x.to_numpy(float),sub.y.to_numpy(float),sub.session_date.astype(str).to_numpy(),sub.symbol.to_numpy())
             pearson=float(sub.x.corr(sub.y)); spearman=float(sub.x.corr(sub.y,method="spearman"))
-            rows.append({**row,"on_count":int(len(on)),"off_count":int(len(off)),"signal_on_count":int(len(on)),"signal_off_count":int(len(off)),**on_coverage,**off_coverage,"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(sub.y.mean()),"median_target":float(sub.y.median()),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"raw_p":p,"top_bottom_spread":slope,"monotonicity":np.nan,"shape":"binary_positive" if slope>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":slope,"status":"binary_screened"})
+            rows.append({**row,**coverage_fields,"on_count":int(len(on)),"off_count":int(len(off)),"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(sub.y.mean()),"median_target":float(sub.y.median()),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"date_cluster_p":p,"two_way_cluster_se":two_way_se,"two_way_cluster_t":two_way_t,"two_way_cluster_p":two_way_p,"raw_p":two_way_p,"screen_inference":"two_way_date_symbol","top_bottom_spread":slope,"monotonicity":np.nan,"shape":"binary_positive" if slope>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":slope,"status":"binary_screened"})
     return pd.DataFrame(rows)
 
 
@@ -254,14 +254,17 @@ def scan(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], c
             if feature_scan_kind(spec)=="binary":
                 if not x.isin([0,1]).all():
                     raise ValueError(f"Binary feature contains values outside 0/1: {spec.name}")
+                coverage=binary_coverage(sub,spec.name,target);coverage_fields=coverage.as_dict();coverage_status,coverage_reason=pair_status(coverage,config)
                 on=y.loc[x.eq(1)]; off=y.loc[x.eq(0)]
                 if not len(on) or not len(off):
-                    rows.append({**base,"status":"constant_feature"}); continue
+                    rows.append({**base,**coverage_fields,"status":"constant_feature"}); continue
+                if coverage_status!="sufficient":
+                    rows.append({**base,**coverage_fields,"coverage_reason":coverage_reason,"status":"insufficient_data"});continue
                 slope,se,t,p=_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy())
                 two_way_se,two_way_t,two_way_p=_two_way_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy(),sub.symbol.to_numpy())
                 effect=float(on.mean()-off.mean()); direction=np.sign(direction_hint or effect or 1)
                 annual=sub.assign(year=pd.to_datetime(sub.session_date).dt.year).groupby("year").apply(lambda z: z.loc[z[spec.name].eq(1),target].mean()-z.loc[z[spec.name].eq(0),target].mean(),include_groups=False).dropna()
-                rows.append({**base,"scan_kind":"binary","on_count":len(on),"off_count":len(off),"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(y.mean()),"median_target":float(y.median()),"std_target":float(y.std()),"win_rate":float((y>0).mean()),"pearson":float(x.corr(y)),"spearman":float(x.corr(y,method="spearman")),"slope":slope,"cluster_se":se,"cluster_t":t,"two_way_cluster_se":two_way_se,"two_way_cluster_t":two_way_t,"two_way_cluster_p":two_way_p,"raw_p":p,"ci_low":slope-1.96*se,"ci_high":slope+1.96*se,"top_bottom_spread":effect,"monotonicity":np.nan,"shape":"binary_positive" if effect>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":effect,"year_consistency":float((annual*direction>0).mean()) if len(annual) else np.nan,"symbol_breadth":np.nan,"time_stability":np.nan,"outlier_worst_signed_spread":np.nan,"outlier_sensitivity":np.nan,"status":"binary_screened"})
+                rows.append({**base,**coverage_fields,"scan_kind":"binary","on_count":len(on),"off_count":len(off),"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(y.mean()),"median_target":float(y.median()),"std_target":float(y.std()),"win_rate":float((y>0).mean()),"pearson":float(x.corr(y)),"spearman":float(x.corr(y,method="spearman")),"slope":slope,"cluster_se":se,"cluster_t":t,"date_cluster_p":p,"two_way_cluster_se":two_way_se,"two_way_cluster_t":two_way_t,"two_way_cluster_p":two_way_p,"raw_p":two_way_p,"screen_inference":"two_way_date_symbol","ci_low":slope-1.96*two_way_se,"ci_high":slope+1.96*two_way_se,"top_bottom_spread":effect,"monotonicity":np.nan,"shape":"binary_positive" if effect>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":effect,"year_consistency":float((annual*direction>0).mean()) if len(annual) else np.nan,"symbol_breadth":np.nan,"time_stability":np.nan,"outlier_worst_signed_spread":np.nan,"outlier_sensitivity":np.nan,"status":"binary_screened"})
                 quantile_tables[(spec.name,target)]=pd.DataFrame([{"signal":0,"count":len(off),"mean":off.mean(),"median":off.median()},{"signal":1,"count":len(on),"mean":on.mean(),"median":on.median()}])
                 continue
             slope,se,t,p=_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy())

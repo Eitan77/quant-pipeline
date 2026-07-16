@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import ast
+import json
+from dataclasses import MISSING, asdict, dataclass, fields
+from pathlib import Path
 from typing import Iterable
 
 
@@ -155,3 +158,75 @@ def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, o
 def registry_frame(specs: Iterable[FeatureSpec | TargetSpec]):
     import pandas as pd
     return pd.DataFrame([asdict(x) for x in specs])
+
+
+def _load_registry(path: str | Path, cls):
+    """Strictly deserialize a persisted CSV/JSON registry.
+
+    Older Phase 1A runs persist CSV, so tuple and nullable fields must be
+    reconstructed rather than guessed or silently discarded.
+    """
+    source = Path(path)
+    if source.suffix.lower() == ".json":
+        records = json.loads(source.read_text(encoding="utf-8"))
+    else:
+        import pandas as pd
+        frame = pd.read_csv(source)
+        records = frame.where(frame.notna(), None).to_dict("records")
+    allowed = {item.name: item for item in fields(cls)}
+    required = {
+        item.name for item in fields(cls)
+        if item.default is MISSING and item.default_factory is MISSING
+    }
+    result = []
+    for row_number, record in enumerate(records, start=2):
+        unknown = set(record) - set(allowed)
+        if unknown:
+            raise ValueError(f"Unknown {cls.__name__} registry fields at row {row_number}: {sorted(unknown)}")
+        missing = required - {key for key, value in record.items() if value is not None}
+        if missing:
+            raise ValueError(f"Missing {cls.__name__} registry fields at row {row_number}: {sorted(missing)}")
+        values = {}
+        for key, value in record.items():
+            missing_value = value is None or (not isinstance(value, (list, tuple, dict)) and bool(pd.isna(value))) if source.suffix.lower() != ".json" else value is None
+            if missing_value:
+                values[key] = None
+            elif key in {"required_columns", "parent_features"}:
+                if isinstance(value, str):
+                    try:
+                        value = ast.literal_eval(value)
+                    except (SyntaxError, ValueError) as exc:
+                        raise ValueError(f"Malformed tuple field {key} at row {row_number}") from exc
+                if not isinstance(value, (list, tuple)):
+                    raise ValueError(f"Registry field {key} must be a list or tuple at row {row_number}")
+                values[key] = tuple(str(item) for item in value)
+            elif key in {"session_reset", "uses_current_bar", "uses_previous_sessions", "overlaps"}:
+                if isinstance(value, str):
+                    if value.lower() not in {"true", "false"}:
+                        raise ValueError(f"Malformed boolean field {key} at row {row_number}")
+                    value = value.lower() == "true"
+                values[key] = bool(value)
+            elif key in {"lookback", "minimum_history_bars", "feature_available_offset_minutes", "arity", "complexity_units", "expected_direction", "horizon_minutes"}:
+                values[key] = None if value is None else int(value)
+            else:
+                values[key] = value
+        result.append(cls(**values))
+    names = [item.name for item in result]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Duplicate names in {cls.__name__} registry")
+    return result
+
+
+def load_feature_registry(path: str | Path) -> list[FeatureSpec]:
+    return _load_registry(path, FeatureSpec)
+
+
+def load_target_registry(path: str | Path) -> list[TargetSpec]:
+    return _load_registry(path, TargetSpec)
+
+
+def write_registry_json(specs: Iterable[FeatureSpec | TargetSpec], path: str | Path) -> None:
+    destination = Path(path)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps([asdict(item) for item in specs], indent=2), encoding="utf-8")
+    temporary.replace(destination)

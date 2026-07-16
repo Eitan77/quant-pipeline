@@ -10,6 +10,8 @@ from quant_pipeline.dual_registry import compile_dual_plan, plan_hash
 from quant_pipeline.effects import effect_value, feature_scan_kind
 from quant_pipeline.registry import FeatureSpec, feature_registry
 from quant_pipeline.scanner import binary_scan_batch, scan
+from quant_pipeline.phase1b_run import merge_combined_results
+from quant_pipeline.registry import TargetSpec
 
 
 def test_phase1b_manifest_is_deterministic_and_uses_existing_parents():
@@ -48,6 +50,9 @@ def test_binary_screen_reports_exact_on_minus_off_effect():
     assert result["scan_kind"]=="binary"
     assert np.isclose(result["top_bottom_spread"],.0015)
     assert np.isnan(result["monotonicity"])
+    assert result["screen_inference"]=="two_way_date_symbol"
+    assert result["raw_p"]==pytest.approx(result["two_way_cluster_p"])
+    assert "date_cluster_p" in result.index
 
 
 def test_exact_binary_scan_does_not_construct_deciles():
@@ -85,3 +90,51 @@ def test_manifest_rejects_invalid_definition_before_data_access(tmp_path):
     path.write_text("schema_version: phase1b_manifest_v1\ndefinitions:\n  - id: bad\n    feature_a: session_range_position\n    feature_b: tod_relative_volume_20\n    operator: intersection\n    condition_a: {transform: raw, comparator: nope, threshold: 1}\n    condition_b: {transform: raw, comparator: eq, threshold: 1}\n",encoding="utf-8")
     with pytest.raises(ValueError,match="Invalid dual condition"):
         compile_dual_plan(path,feature_registry(ScanConfig().lookbacks),ScanConfig())
+
+
+def test_combined_fdr_recomputes_primary_and_preserves_explicit_redundancy():
+    base=pd.DataFrame({"feature":["base"],"target":["t"],"raw_p":[.01],"feature_family":["base"],"target_family":["t"],"top_bottom_spread":[.001],"monotonicity":[.5],"status":["cuda_screened"],"redundancy_group":["explicit_base"]})
+    dual=pd.DataFrame({"feature":["dual"],"target":["t"],"raw_p":[.02],"feature_family":["dual_factor"],"target_family":["t"],"top_bottom_spread":[.002],"monotonicity":[np.nan],"status":["binary_screened"],"redundancy_group":["explicit_dual"]})
+    targets=[TargetSpec("t","",5,"","",tier="primary")]
+    result=merge_combined_results(base,dual,targets)
+    assert set(result.primary_global_fdr.dropna())=={.02}
+    assert set(result.redundancy_group)=={"explicit_base","explicit_dual"}
+
+
+def test_swapped_commutative_definition_with_swapped_conditions_is_rejected(tmp_path):
+    path=tmp_path/"duplicates.yaml"
+    path.write_text("""schema_version: phase1b_manifest_v1
+definitions:
+  - id: first
+    feature_a: session_range_position
+    feature_b: tod_relative_volume_20
+    operator: intersection
+    condition_a: {transform: raw, comparator: ge, threshold: 0.8}
+    condition_b: {transform: raw, comparator: ge, threshold: 1.2}
+    output_dtype: binary
+  - id: swapped
+    feature_a: tod_relative_volume_20
+    feature_b: session_range_position
+    operator: intersection
+    condition_a: {transform: raw, comparator: ge, threshold: 1.2}
+    condition_b: {transform: raw, comparator: ge, threshold: 0.8}
+    output_dtype: binary
+""",encoding="utf-8")
+    with pytest.raises(ValueError,match="Duplicate commutative"):
+        compile_dual_plan(path,feature_registry(ScanConfig().lookbacks),ScanConfig())
+
+
+def test_binary_pair_coverage_uses_target_complete_on_and_off_states():
+    spec=FeatureSpec("signal","","test",dtype="binary")
+    dates=pd.date_range("2025-01-01",periods=6,freq="D")
+    frame=pd.DataFrame({
+        "signal":[0,1]*6,
+        "target":[0.0,np.nan,0.0,np.nan,0.0,np.nan,0.0,.001,0.0,.001,0.0,.001],
+        "session_date":np.repeat(dates,2),"symbol":["A","B"]*6,
+        "decision_ts":pd.date_range("2025-01-01",periods=12,freq="5min",tz="UTC"),
+        "analysis_eligible":True,
+    })
+    config=ScanConfig(min_observations=4,min_sessions=2,min_symbols=2,min_decision_timestamps=2,min_years=1,binary_min_on_observations=4,binary_min_off_observations=4,binary_min_on_sessions=2,binary_min_off_sessions=2,binary_min_on_symbols=1,binary_min_off_symbols=1)
+    row=binary_scan_batch(frame,[spec],["target"],config).iloc[0]
+    assert row.status=="insufficient_data"
+    assert row.coverage_reason=="insufficient_on_observations"

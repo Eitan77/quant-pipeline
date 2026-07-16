@@ -52,3 +52,16 @@ review.
 
 See [PHASE1_FINAL_REPAIR_NOTES.md](PHASE1_FINAL_REPAIR_NOTES.md) for the
 final repair contract, current data-source limitations, and rerun boundary.
+# Phase 1B derived discovery
+
+Phase 1B reuses a completed Phase 1A run as an immutable parent. It does not
+load raw data or rebuild canonical bars, base features, or targets.
+
+```powershell
+quant-pipeline-phase1b --source-run "D:\AlgoResearch\Quant Pipeline\runs\phase1_final_discovery_through_20260430" --config configs\phase1b_only.yaml
+```
+
+The command writes a separate derived run, recomputes FDR over the combined
+Phase 1A and Phase 1B hypotheses, runs exact diagnostics for selected dual
+factors, and records `promotion_ready` explicitly. May 1, 2026 and later remain
+sealed.

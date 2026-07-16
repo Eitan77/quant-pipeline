@@ -120,6 +120,7 @@ class ScanConfig:
     binary_min_off_sessions: int = 50
     binary_min_on_symbols: int = 10
     binary_min_off_symbols: int = 10
+    binary_primary_screen_inference: str = "two_way_date_symbol"
     bar_interval_minutes: int = 5
 
     @classmethod
@@ -152,4 +153,6 @@ class ScanConfig:
             raise ValueError("dual-factor activation-rate bounds must satisfy 0 <= min < max <= 1")
         if self.binary_semantics_validation not in {"error", "warn", "off"}:
             raise ValueError("binary_semantics_validation must be error, warn, or off")
+        if self.binary_primary_screen_inference != "two_way_date_symbol":
+            raise ValueError("binary_primary_screen_inference must be two_way_date_symbol")
         if self.bar_interval_minutes<=0:raise ValueError("bar_interval_minutes must be positive")

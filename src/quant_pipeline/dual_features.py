@@ -12,6 +12,7 @@ from .config import ScanConfig
 from .dual_registry import CompiledDualFeature, ConditionSpec, TransformSpec
 from .holdout import assert_pre_holdout_frame
 from .registry import FeatureSpec
+from .binary_coverage import binary_coverage, build_status
 
 
 def build_feature_cache_index(feature_paths: list[Path], specs_by_chunk: list[list[FeatureSpec]]) -> dict[str, Path]:
@@ -104,12 +105,8 @@ def _materialize(frame: pd.DataFrame, compiled: CompiledDualFeature, config: Sca
 
 
 def binary_build_status(metrics: dict, config: ScanConfig) -> tuple[str,str|None]:
-    if metrics["signal_on_count"] < config.dual_factor_min_signal_observations:return "skipped","insufficient_signal_observations"
-    if metrics["signal_on_sessions"] < config.dual_factor_min_signal_sessions:return "skipped","insufficient_signal_sessions"
-    if metrics["signal_on_symbols"] < config.dual_factor_min_signal_symbols:return "skipped","insufficient_signal_symbols"
-    if metrics["activation_rate"] < config.dual_factor_min_activation_rate:return "skipped","activation_rate_too_low"
-    if metrics["activation_rate"] > config.dual_factor_max_activation_rate:return "skipped","activation_rate_too_high"
-    return "built",None
+    from .binary_coverage import BinaryCoverage
+    return build_status(BinaryCoverage(**metrics),config)
 
 
 def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_by_name: dict[str, Path], config: ScanConfig, output_root: Path, fingerprint_sha: str) -> tuple[list[Path], list[list[FeatureSpec]], list[dict]]:
@@ -141,16 +138,17 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
                 frame[item.spec.name] = _materialize(frame, item, config)
             keep = [col for col in frame.columns if col in ROW_KEYS or col in {"session_date", "analysis_eligible", "symbol", "bar_start_ts", "decision_ts"} or col in {s.name for s in specs}]
             frame = frame.loc[:, list(dict.fromkeys(keep))]
-            frame.to_parquet(path, index=False)
+            temporary=path.with_suffix(path.suffix+".tmp");frame.to_parquet(temporary,index=False);temporary.replace(path)
             write_cache_metadata(path, frame, fingerprint_sha, config.sealed_holdout_start)
         built_specs=[]
         for spec in specs:
             signal = pd.to_numeric(frame[spec.name], errors="coerce")
             eligible=frame.get("analysis_eligible",pd.Series(True,index=frame.index)).fillna(False).astype(bool)
-            valid=signal.notna()&eligible; on=valid&signal.eq(1); off=valid&signal.eq(0)
-            metrics={"valid_observations":int(valid.sum()),"activation_rate":float(signal.loc[valid].mean()) if spec.dtype=="binary" and valid.any() else np.nan,"signal_on_count":int(on.sum()),"signal_off_count":int(off.sum()),"signal_on_sessions":int(frame.loc[on,"session_date"].nunique()),"signal_on_symbols":int(frame.loc[on,"symbol"].nunique()),"signal_on_decision_timestamps":int(frame.loc[on,"decision_ts"].nunique())}
-            if spec.dtype=="binary":status,reason=binary_build_status(metrics,config)
+            valid=signal.notna()&eligible
+            if spec.dtype=="binary":
+                metrics=binary_coverage(frame,spec.name).as_dict();status,reason=build_status(binary_coverage(frame,spec.name),config)
             else:status,reason=("built",None) if valid.any() else ("skipped","insufficient_valid_observations")
+            if spec.dtype!="binary":metrics={"valid_observations":int(valid.sum()),"activation_rate":np.nan,"signal_on_count":0,"signal_off_count":0,"signal_on_sessions":0,"signal_off_sessions":0,"signal_on_symbols":0,"signal_off_symbols":0,"signal_on_decision_timestamps":0,"signal_off_decision_timestamps":0}
             coverage.append({"feature":spec.name,"status":status,"skip_reason":reason,**metrics})
             if status=="built":built_specs.append(spec)
         specs_by_chunk[-1]=built_specs

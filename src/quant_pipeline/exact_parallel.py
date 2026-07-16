@@ -51,6 +51,7 @@ def exact_pair(
     confirmed,_=scan(confirmation,[spec],[target],replace(config,use_cuda=False),None,skip_dense=False,direction_hint=direction_hint) if config.use_separate_confirmation_period else (pd.DataFrame(),{})
     diagnostic_tables={}
     if row is not None:
+        table=tables.get((spec.name,target),pd.DataFrame()).to_dict("records")
         if config.use_separate_confirmation_period and not confirmed.empty:
             c=confirmed.iloc[0]
             for column in ["n","valid_sessions","valid_symbols","spearman","top_bottom_spread","two_way_cluster_t","two_way_cluster_p","session_bootstrap_ci_low","session_bootstrap_ci_high","symbol_breadth","time_stability","outlier_worst_signed_spread"]:

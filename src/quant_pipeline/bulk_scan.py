@@ -260,5 +260,9 @@ def _finalize(result: pd.DataFrame) -> pd.DataFrame:
     result.loc[eligible&(result.bh_fdr_p_global<.05),"status"]="statistically_interesting"
     result["test_count"]=int(result.raw_p.notna().sum()); effect=result.top_bottom_spread.abs().fillna(0).rank(pct=True); significance=(1-result.bh_fdr_p.fillna(1)).clip(0,1)
     result["anomaly_score"]=.4*effect+.35*significance+.25*result.monotonicity.abs().fillna(0)
-    result["redundancy_group"]=result.feature.str.replace(r"_(1|2|3|4|5|6|8|10|12|15|20|24|30|36|48|60|78)$","_LOOKBACK",regex=True)
+    derived_group=result.feature.str.replace(r"_(1|2|3|4|5|6|8|10|12|15|20|24|30|36|48|60|78)$","_LOOKBACK",regex=True)
+    if "redundancy_group" not in result:result["redundancy_group"]=derived_group
+    else:
+        supplied=result["redundancy_group"].astype("string")
+        result["redundancy_group"]=supplied.where(supplied.notna()&supplied.str.len().gt(0),derived_group)
     return result.sort_values("anomaly_score",ascending=False,na_position="last").reset_index(drop=True)

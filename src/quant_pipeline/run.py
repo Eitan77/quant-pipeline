@@ -20,6 +20,7 @@ from .table import add_targets, filter_decision_rows, load_canonical_bars, sourc
 from .fingerprint import enforce_fingerprint,run_fingerprint
 from .cache import ROW_KEYS,assert_cache_key_alignment,validate_cache,write_cache_metadata
 from .holdout import assert_pre_holdout_frame
+from .screen_finalization import finalize_phase1_screen
 
 
 def execute(config: ScanConfig) -> Path:
@@ -218,13 +219,8 @@ def execute(config: ScanConfig) -> Path:
                 (root/"progress.json").write_text(json.dumps({"stage":"cuda_screen","completed_batches":completed_batches,"total_batches":total_batches,"completed_feature_chunks":feature_index,"total_feature_chunks":len(chunks),"completed_pairs":len(results),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
                 del screen_targets; gc.collect()
         del feature_context,feature_frame,screen_features; gc.collect()
-    results=finalize_screen(results.drop_duplicates(["feature","target"],keep="last"))
-    # Registry metadata is the authority for Phase/lineage/redundancy and must
-    # not be inferred from generated names.
-    registry_metadata=registry_frame(requested).drop(columns=["description","classification","dtype"],errors="ignore")
-    results=results.drop(columns=[c for c in registry_metadata.columns if c in results and c != "feature"],errors="ignore").merge(registry_metadata.rename(columns={"name":"feature"}),on="feature",how="left")
-    results["scan_kind"]=np.where(results.dtype.eq("binary"),"binary",np.where(results.dtype.eq("categorical"),"categorical","continuous"))
-    results["redundancy_group"]=results.redundancy_group.fillna(results.feature)
+    finalized=finalize_phase1_screen(results.drop_duplicates(["feature","target"],keep="last"),feature_registry=requested,target_registry=targets,config=config)
+    results=finalized.master;primary=finalized.primary;exploratory=finalized.exploratory
     results.to_csv(checkpoint,index=False)
     if journal.exists(): journal.unlink()
     if categorical_journal.exists():categorical_journal.unlink()
@@ -235,17 +231,7 @@ def execute(config: ScanConfig) -> Path:
         if s.family=="opening" and s.lookback is not None and s.lookback<5: return "Opening window is shorter than configured 5-minute source bars"
         return "Not constructible from configured point-in-time inputs"
     pd.DataFrame([{"feature": s.name, "status": "built" if s.name not in skipped else "skipped", "reason": "" if s.name not in skipped else skip_reason(s)} for s in requested]).to_csv(root / "scan_coverage.csv", index=False)
-    tier={t.name:t.tier for t in targets}; results["target_tier"]=results.target.map(tier); results.to_csv(root/"master_results.csv",index=False)
-    primary=results.loc[results.target_tier.eq("primary")].copy(); primary["primary_global_fdr"]=benjamini_hochberg(primary.raw_p)
-    primary["family_fdr"]=primary.groupby(["feature_family","target_family"],dropna=False).raw_p.transform(benjamini_hochberg)
-    primary["candidate_cluster"]=primary.redundancy_group.fillna(primary.feature)+"__"+primary.target.map(_target_horizon_family)
-    primary["cluster_fdr"]=primary.groupby("candidate_cluster",dropna=False).raw_p.transform(benjamini_hochberg)
-    exploratory=results.loc[results.target_tier.eq("exploratory")].copy()
-    exploratory["exploratory_family_fdr"]=exploratory.groupby(["feature_family","target_family"],dropna=False).raw_p.transform(benjamini_hochberg)
-    results=results.merge(primary[["feature","target","primary_global_fdr"]],on=["feature","target"],how="left")
-    if not exploratory.empty:results=results.merge(exploratory[["feature","target","exploratory_family_fdr"]],on=["feature","target"],how="left")
-    else:results["exploratory_family_fdr"]=np.nan
-    results["primary_test_count"]=int(primary.raw_p.notna().sum()); results["exploratory_test_count"]=int(exploratory.raw_p.notna().sum()); results.to_csv(root/"master_results.csv",index=False)
+    results.to_csv(root/"master_results.csv",index=False)
     if compiled_dual:
         parent_rows=[]
         for item in compiled_dual:
