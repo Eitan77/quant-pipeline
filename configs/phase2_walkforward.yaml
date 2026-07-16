@@ -1,8 +1,0 @@
-phase2_run_dir: D:/AlgoResearch/Quant Pipeline/runs/phase2_high_return_baselines_through_20260430
-sealed_holdout_start: '2026-05-01'
-cost_bps_per_side: 2.0
-shrinkage_prior_trades: 30
-minimum_history_trades: 15
-specialist_pool_sizes: [3, 5, 10, 20]
-minimum_edges_bps: [0, 5]
-trial_budget: 40
