@@ -103,6 +103,7 @@ def _spec(definition: DualFeatureDefinition, parents: tuple[FeatureSpec,FeatureS
         feature_available_offset_minutes=max(parents[0].feature_available_offset_minutes,parents[1].feature_available_offset_minutes),
         eligibility_requirement=_combine_eligibility(parents[0].eligibility_requirement,parents[1].eligibility_requirement),
         price_basis=parents[0].price_basis if parents[0].price_basis==parents[1].price_basis else "derived_mixed_parent_price_basis",
+        evidence_class="curated_predeclared_interaction",
     )
 
 

@@ -8,6 +8,119 @@ import yaml
 
 
 @dataclass(frozen=True)
+class SystematicParentSelectionConfig:
+    max_parent_features: int = 120
+    max_per_feature_family: int = 12
+    max_per_redundancy_group: int = 2
+    primary_global_fdr_max: float = 0.20
+    minimum_absolute_effect_bps: float = 0.50
+    minimum_valid_observations: int = 100_000
+    minimum_sessions: int = 750
+    minimum_symbols: int = 75
+    minimum_decision_timestamps: int = 250
+    include_top_per_family_when_threshold_not_met: int = 3
+    include_top_per_target_family_when_threshold_not_met: int = 5
+
+
+@dataclass(frozen=True)
+class SystematicPairGenerationConfig:
+    max_parent_pairs: int = 5_000
+    forbid_identical_parent: bool = True
+    forbid_same_redundancy_group: bool = True
+    maximum_absolute_parent_spearman: float = 0.90
+    maximum_pairs_per_family_pair: int = 500
+    minimum_joint_observations: int = 250_000
+    minimum_joint_sessions: int = 750
+    minimum_joint_symbols: int = 75
+    minimum_joint_decision_timestamps: int = 250
+
+
+@dataclass(frozen=True)
+class SystematicOperatorConfig:
+    aligned_rank_mean: bool = True
+    directional_intersection: bool = True
+    gated_anchor: bool = True
+    persistence_intersection: bool = False
+
+
+@dataclass(frozen=True)
+class SystematicBinaryCoverageConfig:
+    minimum_on_observations: int = 10_000
+    minimum_off_observations: int = 10_000
+    minimum_on_sessions: int = 250
+    minimum_off_sessions: int = 250
+    minimum_on_symbols: int = 50
+    minimum_off_symbols: int = 50
+    minimum_activation_rate: float = 0.005
+    maximum_activation_rate: float = 0.20
+
+
+@dataclass(frozen=True)
+class SystematicLimitsConfig:
+    max_generated_features: int = 15_000
+    feature_chunk_size: int = 32
+
+
+@dataclass(frozen=True)
+class SystematicScreeningConfig:
+    primary_targets_only: bool = True
+    exploratory_family_fdr_max: float = 0.05
+    exact_candidate_limit: int = 250
+
+
+@dataclass(frozen=True)
+class SystematicPromotionConfig:
+    minimum_absolute_effect_bps: float = 1.0
+    minimum_effect_ratio_vs_best_parent: float = 1.25
+    minimum_effect_increment_bps_vs_best_parent: float = 0.25
+    minimum_positive_historical_fold_fraction: float = 0.60
+    minimum_recent_to_full_effect_ratio: float = 0.50
+    maximum_recent_to_full_effect_ratio: float = 2.50
+    minimum_expected_direction_symbol_fraction: float = 0.55
+    maximum_symbol_effect_hhi: float = 0.02
+    maximum_top5_symbol_effect_share: float = 0.25
+    minimum_remove_top5_effect_retention: float = 0.50
+
+
+@dataclass(frozen=True)
+class SystematicPhase1BConfig:
+    enabled: bool = True
+    parent_selection: SystematicParentSelectionConfig = field(default_factory=SystematicParentSelectionConfig)
+    pair_generation: SystematicPairGenerationConfig = field(default_factory=SystematicPairGenerationConfig)
+    operators: SystematicOperatorConfig = field(default_factory=SystematicOperatorConfig)
+    binary_state_coverage: SystematicBinaryCoverageConfig = field(default_factory=SystematicBinaryCoverageConfig)
+    limits: SystematicLimitsConfig = field(default_factory=SystematicLimitsConfig)
+    screening: SystematicScreeningConfig = field(default_factory=SystematicScreeningConfig)
+    promotion: SystematicPromotionConfig = field(default_factory=SystematicPromotionConfig)
+
+    @classmethod
+    def from_dict(cls, values: dict[str, Any] | None) -> "SystematicPhase1BConfig":
+        values = dict(values or {})
+        mapping = {
+            "parent_selection": SystematicParentSelectionConfig,
+            "pair_generation": SystematicPairGenerationConfig,
+            "operators": SystematicOperatorConfig,
+            "binary_state_coverage": SystematicBinaryCoverageConfig,
+            "limits": SystematicLimitsConfig,
+            "screening": SystematicScreeningConfig,
+            "promotion": SystematicPromotionConfig,
+        }
+        unknown = set(values) - ({"enabled"} | set(mapping))
+        if unknown:
+            raise ValueError(f"Unknown systematic_phase1b keys: {sorted(unknown)}")
+        for key, kind in mapping.items():
+            raw = values.get(key, {})
+            if isinstance(raw, kind):
+                continue
+            allowed = set(kind.__dataclass_fields__)
+            nested_unknown = set(raw or {}) - allowed
+            if nested_unknown:
+                raise ValueError(f"Unknown systematic_phase1b.{key} keys: {sorted(nested_unknown)}")
+            values[key] = kind(**(raw or {}))
+        return cls(**values)
+
+
+@dataclass(frozen=True)
 class ScanConfig:
     catalog_path: str = "D:/AlgoResearch/data/catalog.duckdb"
     source_table: str = "derived_bars_5m"
@@ -100,6 +213,8 @@ class ScanConfig:
     # Phase 1B dual-factor discovery.  Disabled by default so Phase 1A runs
     # retain their current registry, cache, and scan behaviour.
     dual_factor_enabled: bool = False
+    phase1b_mode: str = "curated_only"
+    systematic_phase1b: SystematicPhase1BConfig = field(default_factory=SystematicPhase1BConfig)
     dual_factor_manifest_path: str | None = None
     dual_factor_feature_chunk_size: int = 32
     dual_factor_max_generated_features: int = 500
@@ -130,6 +245,8 @@ class ScanConfig:
         unknown = set(values) - allowed
         if unknown:
             raise ValueError(f"Unknown config keys: {sorted(unknown)}")
+        if isinstance(values.get("systematic_phase1b"), dict):
+            values["systematic_phase1b"] = SystematicPhase1BConfig.from_dict(values["systematic_phase1b"])
         config=cls(**values); config.validate(); return config
 
     def as_dict(self) -> dict[str, Any]:
@@ -156,3 +273,12 @@ class ScanConfig:
         if self.binary_primary_screen_inference != "two_way_date_symbol":
             raise ValueError("binary_primary_screen_inference must be two_way_date_symbol")
         if self.bar_interval_minutes<=0:raise ValueError("bar_interval_minutes must be positive")
+        if self.phase1b_mode not in {"curated_only", "systematic_only", "curated_plus_systematic"}:
+            raise ValueError("phase1b_mode must be curated_only, systematic_only, or curated_plus_systematic")
+        systematic=self.systematic_phase1b
+        if systematic.limits.max_generated_features<=0 or systematic.limits.feature_chunk_size<=0:
+            raise ValueError("systematic Phase 1B limits must be positive")
+        if not 0 <= systematic.binary_state_coverage.minimum_activation_rate < systematic.binary_state_coverage.maximum_activation_rate <= 1:
+            raise ValueError("systematic binary activation bounds must satisfy 0 <= min < max <= 1")
+        if systematic.pair_generation.maximum_absolute_parent_spearman < 0 or systematic.pair_generation.maximum_absolute_parent_spearman > 1:
+            raise ValueError("systematic maximum parent Spearman must be in [0, 1]")

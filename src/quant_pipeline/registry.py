@@ -41,6 +41,7 @@ class FeatureSpec:
     redundancy_group: str | None = None
     complexity_units: int = 1
     expected_direction: int = 0
+    evidence_class: str | None = None
 
 
 @dataclass(frozen=True)

@@ -71,6 +71,7 @@ def finalize_phase1_screen(
         "discovery_phase", "arity", "operator", "parent_features",
         "redundancy_group", "lineage_hash", "complexity_units",
         "expected_direction",
+        "evidence_class",
     ]
     features = features[authoritative]
     result = result.drop(columns=[column for column in authoritative if column != "feature" and column in result], errors="ignore")

@@ -261,3 +261,27 @@ def test_built_dual_rows_without_valid_inference_fail(tmp_path,monkeypatch):
         run_phase1b(source,config)
     output=Path(config.output_root)/config.experiment_id/"manifest.json"
     assert not output.exists() or json.loads(output.read_text()).get("promotion_ready") is not True
+
+
+def test_systematic_only_end_to_end_keeps_source_immutable_and_separates_fdr(tmp_path):
+    source,_,config=_source(tmp_path);before=_tree_hash(source)
+    master=pd.read_csv(source/"master_results.csv")
+    master["target_tier"]="primary";master["target_family"]="target_5m";master["primary_global_fdr"]=[.05,.10];master["anomaly_score"]=[1.,.8]
+    master["valid_observations"]=24;master["valid_sessions"]=4;master["valid_symbols"]=3;master["valid_decision_timestamps"]=8
+    master.to_csv(source/"master_results.csv",index=False)
+    # The source fixture is intentionally immutable during execution; update its
+    # declared artifact hash before taking the byte-for-byte baseline.
+    config=replace(config,phase1b_mode="systematic_only",experiment_id="systematic_test")
+    parent=replace(config.systematic_phase1b.parent_selection,minimum_valid_observations=4,minimum_sessions=2,minimum_symbols=2,minimum_decision_timestamps=2)
+    pair=replace(config.systematic_phase1b.pair_generation,minimum_joint_observations=4,minimum_joint_sessions=2,minimum_joint_symbols=2,minimum_joint_decision_timestamps=2)
+    binary=replace(config.systematic_phase1b.binary_state_coverage,minimum_on_observations=2,minimum_off_observations=2,minimum_on_sessions=1,minimum_off_sessions=1,minimum_on_symbols=1,minimum_off_symbols=1,minimum_activation_rate=0,maximum_activation_rate=1)
+    config=replace(config,systematic_phase1b=replace(config.systematic_phase1b,parent_selection=parent,pair_generation=pair,binary_state_coverage=binary))
+    before=_tree_hash(source);root=run_phase1b(source,config)
+    assert _tree_hash(source)==before
+    systematic=pd.read_csv(root/"phase1b"/"systematic"/"screen_results.csv")
+    assert len(systematic)>0 and systematic.target_tier.eq("exploratory").all()
+    assert systematic.systematic_test_count.iloc[0]==systematic.raw_p.notna().sum()
+    combined=pd.read_csv(root/"master_results.csv")
+    assert combined.loc[combined.discovery_phase.eq("1B_systematic"),"primary_global_fdr"].isna().all()
+    assert (root/"phase1b"/"systematic"/"parent_selection.csv").exists()
+    assert (root/"phase1b"/"combined"/"dual_parent_comparison.csv").exists()
