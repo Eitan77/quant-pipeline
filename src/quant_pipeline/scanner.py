@@ -11,6 +11,7 @@ from scipy import stats
 from .config import ScanConfig
 from .registry import FeatureSpec
 from .gpu import CorrelationBackend
+from .effects import feature_scan_kind
 
 
 def _normal_pvalue(z: float) -> float:
@@ -101,6 +102,29 @@ def categorical_scan_batch(frame:pd.DataFrame,features:list[FeatureSpec],targets
     return pd.DataFrame(rows)
 
 
+def binary_scan_batch(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], config: ScanConfig) -> pd.DataFrame:
+    """Exact binary on/off screen; binary values are never quantile binned."""
+    eligible=frame.analysis_eligible.fillna(False).to_numpy() if "analysis_eligible" in frame else np.ones(len(frame),dtype=bool)
+    base=frame.loc[eligible]; rows=[]
+    for spec in features:
+        x=pd.to_numeric(base[spec.name],errors="coerce")
+        if not x.dropna().isin([0,1]).all():
+            raise ValueError(f"Binary feature contains values outside 0/1: {spec.name}")
+        for target in targets:
+            y=pd.to_numeric(base[target],errors="coerce"); valid=x.notna()&y.notna(); sub=base.loc[valid,["session_date","symbol","decision_ts"]].copy(); sub["x"]=x.loc[valid]; sub["y"]=y.loc[valid]
+            count=len(sub); sessions=sub.session_date.nunique(); symbols=sub.symbol.nunique(); decisions=sub.decision_ts.nunique(); years=pd.to_datetime(sub.session_date).dt.year.nunique()
+            row={"feature":spec.name,"feature_family":spec.family,"feature_classification":spec.classification,"scan_kind":"binary","discovery_phase":spec.discovery_phase,"arity":spec.arity,"operator":spec.operator,"parent_features":json.dumps(spec.parent_features),"redundancy_group":spec.redundancy_group,"target":target,"target_family":target.removesuffix("_benchmark_adjusted"),"table_rows":len(frame),"n":count,"valid_observations":count,"sessions":sessions,"valid_sessions":sessions,"symbols":symbols,"valid_symbols":symbols,"valid_decision_timestamps":decisions,"valid_years":years,"raw_p":np.nan}
+            if count<config.min_observations or sessions<config.min_sessions or symbols<config.min_symbols or decisions<config.min_decision_timestamps or years<config.min_years:
+                rows.append({**row,"status":"insufficient_data"}); continue
+            on=sub.loc[sub.x.eq(1),"y"]; off=sub.loc[sub.x.eq(0),"y"]
+            if not len(on) or not len(off):
+                rows.append({**row,"status":"constant_feature"}); continue
+            slope,se,t,p=_clustered_slope(sub.x.to_numpy(float),sub.y.to_numpy(float),sub.session_date.astype(str).to_numpy())
+            pearson=float(sub.x.corr(sub.y)); spearman=float(sub.x.corr(sub.y,method="spearman"))
+            rows.append({**row,"on_count":int(len(on)),"off_count":int(len(off)),"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(sub.y.mean()),"median_target":float(sub.y.median()),"pearson":pearson,"spearman":spearman,"slope":slope,"cluster_se":se,"cluster_t":t,"raw_p":p,"top_bottom_spread":slope,"monotonicity":np.nan,"shape":"binary_positive" if slope>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":slope,"status":"binary_screened"})
+    return pd.DataFrame(rows)
+
+
 def _hac_mean(series: pd.Series,max_lag: int|None=None) -> tuple[float,float,float]:
     values=pd.Series(series,dtype=float).dropna().to_numpy()
     if len(values)<3:return (float(np.mean(values)) if len(values) else np.nan,np.nan,np.nan)
@@ -188,6 +212,11 @@ def benjamini_hochberg(values: pd.Series) -> pd.Series:
 
 def _signed_decile_spread(frame:pd.DataFrame,feature:str,target:str)->float:
     if len(frame)<20:return np.nan
+    values=pd.to_numeric(frame[feature],errors="coerce")
+    finite=values.dropna()
+    if len(finite) and finite.isin([0,1]).all():
+        on=frame.loc[values.eq(1),target]; off=frame.loc[values.eq(0),target]
+        return float(on.mean()-off.mean()) if len(on) and len(off) else np.nan
     try:bins=pd.qcut(frame[feature].rank(method="first"),10,labels=False,duplicates="drop")
     except ValueError:return np.nan
     means=frame.groupby(bins,observed=True)[target].mean()
@@ -214,6 +243,19 @@ def scan(frame: pd.DataFrame, features: list[FeatureSpec], targets: list[str], c
                 clustered=_categorical_clustered_test(sub,spec.name,target)
                 rows.append({**base,**clustered,"category_max_minus_min":float(categories["mean"].max()-categories["mean"].min()),"status":"categorical_screened"})
                 quantile_tables[(spec.name,target)]=categories.reset_index().rename(columns={spec.name:"category"})
+                continue
+            if feature_scan_kind(spec)=="binary":
+                if not x.isin([0,1]).all():
+                    raise ValueError(f"Binary feature contains values outside 0/1: {spec.name}")
+                on=y.loc[x.eq(1)]; off=y.loc[x.eq(0)]
+                if not len(on) or not len(off):
+                    rows.append({**base,"status":"constant_feature"}); continue
+                slope,se,t,p=_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy())
+                two_way_se,two_way_t,two_way_p=_two_way_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy(),sub.symbol.to_numpy())
+                effect=float(on.mean()-off.mean()); direction=np.sign(direction_hint or effect or 1)
+                annual=sub.assign(year=pd.to_datetime(sub.session_date).dt.year).groupby("year").apply(lambda z: z.loc[z[spec.name].eq(1),target].mean()-z.loc[z[spec.name].eq(0),target].mean(),include_groups=False).dropna()
+                rows.append({**base,"scan_kind":"binary","on_count":len(on),"off_count":len(off),"on_mean_target":float(on.mean()),"off_mean_target":float(off.mean()),"mean_target":float(y.mean()),"median_target":float(y.median()),"std_target":float(y.std()),"win_rate":float((y>0).mean()),"pearson":float(x.corr(y)),"spearman":float(x.corr(y,method="spearman")),"slope":slope,"cluster_se":se,"cluster_t":t,"two_way_cluster_se":two_way_se,"two_way_cluster_t":two_way_t,"two_way_cluster_p":two_way_p,"raw_p":p,"ci_low":slope-1.96*se,"ci_high":slope+1.96*se,"top_bottom_spread":effect,"monotonicity":np.nan,"shape":"binary_positive" if effect>0 else "binary_negative","effect_kind":"binary_on_minus_off","effect_value":effect,"year_consistency":float((annual*direction>0).mean()) if len(annual) else np.nan,"symbol_breadth":np.nan,"time_stability":np.nan,"outlier_worst_signed_spread":np.nan,"outlier_sensitivity":np.nan,"status":"binary_screened"})
+                quantile_tables[(spec.name,target)]=pd.DataFrame([{"signal":0,"count":len(off),"mean":off.mean(),"median":off.median()},{"signal":1,"count":len(on),"mean":on.mean(),"median":on.median()}])
                 continue
             slope,se,t,p=_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy())
             two_way_se,two_way_t,two_way_p=_two_way_clustered_slope(x.to_numpy(),y.to_numpy(),sub.session_date.astype(str).to_numpy(),sub.symbol.to_numpy())

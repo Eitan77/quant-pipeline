@@ -7,7 +7,7 @@ import pandas as pd
 from scipy import stats
 
 
-def gpu_dense_pair(feature_path: Path, target_path: Path, feature: str, target: str, min_bin: int,selection_end:str) -> tuple[dict, list[dict]]:
+def gpu_dense_pair(feature_path: Path, target_path: Path, feature: str, target: str, min_bin: int,selection_end:str, scan_kind: str="continuous") -> tuple[dict, list[dict]]:
     """Exact dense pair statistics on CUDA; grouped diagnostics stay on CPU."""
     import torch
 
@@ -15,6 +15,13 @@ def gpu_dense_pair(feature_path: Path, target_path: Path, feature: str, target: 
     x=ff.loc[mask,feature].to_numpy(dtype=np.float32,copy=False)
     y=pd.read_parquet(target_path,columns=[target]).loc[mask,target].to_numpy(dtype=np.float32,copy=False)
     valid=np.isfinite(x)&np.isfinite(y); x=x[valid]; y=y[valid]
+    if scan_kind == "binary":
+        on=y[x == 1]; off=y[x == 0]
+        if not len(on) or not len(off):
+            return {"pearson":np.nan,"spearman":np.nan,"top_bottom_spread":np.nan,"monotonicity":np.nan,"shape":"insufficient"}, []
+        effect=float(on.mean()-off.mean())
+        records=[{"signal":0,"count":int(len(off)),"mean":float(off.mean()),"median":float(np.median(off)),"win_rate":float((off>0).mean())},{"signal":1,"count":int(len(on)),"mean":float(on.mean()),"median":float(np.median(on)),"win_rate":float((on>0).mean())}]
+        return {"pearson":float(np.corrcoef(x,y)[0,1]),"spearman":float(stats.spearmanr(x,y).statistic),"outlier_sensitivity":np.nan,"top_bottom_spread":effect,"monotonicity":np.nan,"shape":"binary_positive" if effect > 0 else "binary_negative","mean_target":float(y.mean()),"median_target":float(np.median(y)),"std_target":float(y.std()),"win_rate":float((y>0).mean()),"skewness":float(stats.skew(y)),"downside_p05":float(np.quantile(y,.05)),"upside_p95":float(np.quantile(y,.95)),"effect_kind":"binary_on_minus_off","effect_value":effect}, records
     device=torch.device("cuda:0"); tx=torch.as_tensor(x,device=device); ty=torch.as_tensor(y,device=device)
     pearson=float(_corr(tx,ty).item())
     rx,order=_average_ranks(tx); ry,_=_average_ranks(ty); spearman=float(_corr(rx,ry).item())

@@ -27,6 +27,17 @@ class FeatureSpec:
     feature_available_offset_minutes: int = 0
     eligibility_requirement: str = "tradable_at_decision"
     baseline_inclusion: str = "not_applicable"
+    # Phase 1B provenance fields are appended so existing positional FeatureSpec
+    # construction remains compatible.
+    discovery_phase: str = "1A"
+    arity: int = 1
+    parent_features: tuple[str, ...] = ()
+    operator: str | None = None
+    operator_parameters_json: str | None = None
+    lineage_hash: str | None = None
+    redundancy_group: str | None = None
+    complexity_units: int = 1
+    expected_direction: int = 0
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,7 @@ def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, o
         add(f"relative_volume_inclusive_{n}",f"current volume divided by inclusive {n}-bar intraday mean","volume",n,baseline_inclusion="inclusive")
         for base in ["return", "relative_volume", "realized_vol", "range_position", "return_vol_ratio"]:
             add(f"{base}_rank_{n}", f"cross-sectional percentile rank of {base}_{n}", "cross_sectional", n, "cross_sectional")
+    binary_names={"inside_bar","outside_bar","higher_high","higher_low","lower_high","lower_low","vwap_cross"}
     for name, desc, family in [
         ("intraday_return_1", "one-bar session-reset intraday return", "momentum"),
         ("continuous_return_1", "continuous close-to-close return including overnight movement", "momentum"),
@@ -109,11 +121,11 @@ def feature_registry(lookbacks: Iterable[int], sector_available: bool = False, o
         ("minute_of_session", "regular-session minute", "calendar"), ("minutes_until_close", "minutes to regular close", "calendar"),
         ("decision_time_bucket", "30-minute decision-time bucket", "calendar"),
         ("market_up", "benchmark positive at decision", "market_context"), ("high_market_vol", "benchmark volatility above expanding median", "market_context"),
-    ]: add(name, desc, family, cls="categorical" if name in {"day_of_week","month","quarter","market_up","high_market_vol","decision_time_bucket"} else "time_series",dtype="categorical" if name in {"day_of_week","month","quarter","market_up","high_market_vol","decision_time_bucket"} else "continuous")
+    ]: add(name, desc, family, cls="categorical" if name in {"day_of_week","month","quarter","market_up","high_market_vol","decision_time_bucket"} else "time_series",dtype="categorical" if name in {"day_of_week","month","quarter","market_up","high_market_vol","decision_time_bucket"} else "binary" if name in binary_names else "continuous")
     for name,desc in [("decision_time_sin","cyclical sine encoding of decision minute"),("decision_time_cos","cyclical cosine encoding of decision minute")]:add(name,desc,"calendar")
     for minutes in (list(opening_windows) if opening_windows is not None else [1,3,5,10,15,20,30,45,60,90]):
         for base in ["opening_return", "opening_range", "opening_volume", "opening_realized_vol", "opening_close_location", "distance_opening_high", "distance_opening_low", "opening_breakout", "opening_breakdown"]:
-            add(f"{base}_{minutes}m", f"{base.replace('_',' ')} after completed {minutes}-minute opening window", "opening", minutes)
+            add(f"{base}_{minutes}m", f"{base.replace('_',' ')} after completed {minutes}-minute opening window", "opening", minutes, dtype="binary" if base in {"opening_breakout","opening_breakdown"} else "continuous")
     for lag in [1, 2, 3, 5, 10]:
         for base in ["lagged_market_return", "lagged_breadth_change", "lagged_dispersion_change", "unreacted_market_move"]:
             add(f"{base}_{lag}", f"{lag}-bar {base.replace('_',' ')}", "lead_lag", lag)

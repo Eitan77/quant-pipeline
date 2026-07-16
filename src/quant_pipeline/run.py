@@ -13,7 +13,7 @@ from .config import ScanConfig
 from .features import build_features
 from .parallel_features import build_parallel_blocks, is_symbol_local
 from .registry import feature_registry, registry_frame, target_registry
-from .scanner import benjamini_hochberg,categorical_scan_batch,scan
+from .scanner import benjamini_hochberg,binary_scan_batch,categorical_scan_batch,scan
 from .bulk_scan import assert_valid_screen_results,build_cuda_feature_context,cuda_screen,finalize_screen
 from .report import write_reports
 from .table import add_targets, filter_decision_rows, load_canonical_bars, source_provenance, validate_point_in_time
@@ -26,8 +26,25 @@ def execute(config: ScanConfig) -> Path:
     config.validate()
     run_id=config.experiment_id
     root=Path(config.output_root)/run_id; root.mkdir(parents=True,exist_ok=True)
-    sector=bool(config.sector_map_path); requested=feature_registry(config.lookbacks,sector,config.opening_windows_minutes); targets=target_registry(config.target_horizons_minutes,config.primary_target_horizons_minutes)
-    fingerprint=run_fingerprint(config,requested,targets,_git_revision()); enforce_fingerprint(root,fingerprint,config.resume)
+    sector=bool(config.sector_map_path); base_requested=feature_registry(config.lookbacks,sector,config.opening_windows_minutes); targets=target_registry(config.target_horizons_minutes,config.primary_target_horizons_minutes)
+    compiled_dual=[]
+    if config.dual_factor_enabled:
+        from .dual_registry import compile_dual_plan, plan_hash
+        manifest_path=Path(config.dual_factor_manifest_path or "configs/phase1b_dual_factors.yaml")
+        if not manifest_path.exists(): manifest_path=Path(__file__).resolve().parents[2]/manifest_path
+        compiled_dual=compile_dual_plan(manifest_path,base_requested,config)
+        requested=base_requested+[item.spec for item in compiled_dual]
+        dual_extra={"dual_manifest_hash":hashlib.sha256(manifest_path.read_bytes()).hexdigest(),"dual_plan_hash":plan_hash(compiled_dual),"dual_plan":[item.spec.name for item in compiled_dual]}
+    else:
+        requested=base_requested; dual_extra={}
+    fingerprint=run_fingerprint(config,requested,targets,_git_revision(),extra_components=dual_extra); enforce_fingerprint(root,fingerprint,config.resume)
+    if compiled_dual:
+        phase1b_root=root/"phase1b"; phase1b_root.mkdir(exist_ok=True)
+        manifest_source=Path(config.dual_factor_manifest_path or "configs/phase1b_dual_factors.yaml")
+        if not manifest_source.exists(): manifest_source=Path(__file__).resolve().parents[2]/manifest_source
+        (phase1b_root/"manifest_source.yaml").write_bytes(manifest_source.read_bytes())
+        registry_frame([item.spec for item in compiled_dual]).to_csv(phase1b_root/"dual_feature_registry.csv",index=False)
+        pd.DataFrame([item.spec.__dict__ for item in compiled_dual]).to_json(phase1b_root/"compiled_feature_plan.json",orient="records",indent=2,default_handler=str)
     import gc
     import pandas as pd
     fingerprint_sha=fingerprint["sha256"]; bars_cache=root/"canonical_bars.parquet"; bars=None
@@ -36,7 +53,7 @@ def execute(config: ScanConfig) -> Path:
     else:validate_cache(bars_cache,fingerprint_sha,config.sealed_holdout_start)
     checkpoint=root/"screen_checkpoint.csv"; journal=root/"screen_journal.jsonl"; categorical_journal=root/"categorical_journal.jsonl"; results=pd.DataFrame(); built_names=set(); validation_records=[]
     block_root=root/"blocks"; feature_root=block_root/"features"; target_root=block_root/"targets"; feature_root.mkdir(parents=True,exist_ok=True); target_root.mkdir(parents=True,exist_ok=True)
-    eligible=[s for s in requested if s.status=="requested"]
+    eligible=[s for s in base_requested if s.status=="requested"]
     local_specs=[spec for spec in eligible if is_symbol_local(spec)]
     global_specs=[spec for spec in eligible if not is_symbol_local(spec)]
     chunks=[local_specs[i:i+config.feature_chunk_size] for i in range(0,len(local_specs),config.feature_chunk_size)]
@@ -123,6 +140,18 @@ def execute(config: ScanConfig) -> Path:
             feature_frame.to_parquet(path,index=False); del feature_frame; gc.collect()
             finish_feature_block(feature_index,built)
     del bars; gc.collect()
+    # Phase 1B materializes only after every parent base cache has passed the
+    # same fingerprint/key/holdout validation as Phase 1A.
+    if compiled_dual:
+        from .dual_features import build_dual_feature_chunks, build_feature_cache_index
+        base_index=build_feature_cache_index(feature_paths,built_by_chunk)
+        dual_paths,dual_chunks,dual_coverage=build_dual_feature_chunks(compiled_dual,base_index,config,root/config.dual_factor_cache_subdir,fingerprint_sha)
+        feature_paths.extend(dual_paths); chunks.extend(dual_chunks); built_by_chunk.extend(dual_chunks)
+        built_names.update(spec.name for chunk in dual_chunks for spec in chunk)
+        pd.DataFrame(dual_coverage).to_csv(root/"phase1b"/"dual_feature_coverage.csv",index=False)
+        from .effects import validate_binary_semantics
+        for path, chunk in zip(feature_paths, built_by_chunk):
+            validate_binary_semantics(pd.read_parquet(path,columns=[s.name for s in chunk]),chunk,config.binary_semantics_validation)
     resume_frames=[]
     if config.resume and checkpoint.exists(): resume_frames.append(pd.read_csv(checkpoint))
     if config.resume and journal.exists(): resume_frames.append(pd.read_json(journal,lines=True))
@@ -146,7 +175,8 @@ def execute(config: ScanConfig) -> Path:
             local=pd.to_datetime(feature_frame.decision_ts,utc=True).dt.tz_convert("America/New_York"); selection_mask&=local.dt.strftime("%H:%M").isin(config.decision_times_et)
         selection_mask=selection_mask.to_numpy()
         screen_features=feature_frame.loc[selection_mask].reset_index(drop=True)
-        continuous=[s for s in built if s.classification!="categorical"]
+        continuous=[s for s in built if s.classification!="categorical" and s.dtype not in {"categorical","binary"}]
+        binary=[s for s in built if s.dtype=="binary"]
         categorical=[s for s in built if s.classification=="categorical"]
         feature_context=build_cuda_feature_context(screen_features,continuous,config) if continuous else None
         target_groups=[pending[i:i+config.cuda_target_batch_group_size] for i in range(0,len(pending),config.cuda_target_batch_group_size)]
@@ -166,6 +196,15 @@ def execute(config: ScanConfig) -> Path:
                 screen_targets=future.result()
                 future=prefetch.submit(load_target_group,target_groups[position+1]) if position+1<len(target_groups) else None
                 results=cuda_screen(screen_features,screen_targets,continuous,[t.name for t in target_batch],config,results,journal,feature_context)
+                if binary:
+                    combined=pd.concat([screen_features.reset_index(drop=True),screen_targets[[t.name for t in target_batch]].reset_index(drop=True)],axis=1)
+                    binary_rows=binary_scan_batch(combined,binary,[t.name for t in target_batch],config)
+                    completed_pairs={(row.feature,row.target) for row in results.itertuples()}
+                    binary_rows=binary_rows.loc[[((row.feature,row.target) not in completed_pairs) for row in binary_rows.itertuples()]]
+                    if not binary_rows.empty:
+                        assert_valid_screen_results(binary_rows,"binary screen batch")
+                        binary_rows.to_json(journal,orient="records",lines=True,mode="a",double_precision=15)
+                    results=pd.concat([results,binary_rows],ignore_index=True).drop_duplicates(["feature","target"],keep="last")
                 if categorical:
                     combined=pd.concat([screen_features.reset_index(drop=True),screen_targets[[t.name for t in target_batch]].reset_index(drop=True)],axis=1)
                     cat_rows=categorical_scan_batch(combined,categorical,[t.name for t in target_batch],config)
@@ -179,7 +218,14 @@ def execute(config: ScanConfig) -> Path:
                 (root/"progress.json").write_text(json.dumps({"stage":"cuda_screen","completed_batches":completed_batches,"total_batches":total_batches,"completed_feature_chunks":feature_index,"total_feature_chunks":len(chunks),"completed_pairs":len(results),"updated_at":datetime.now(timezone.utc).isoformat()},indent=2),encoding="utf-8")
                 del screen_targets; gc.collect()
         del feature_context,feature_frame,screen_features; gc.collect()
-    results=finalize_screen(results.drop_duplicates(["feature","target"],keep="last")); results.to_csv(checkpoint,index=False)
+    results=finalize_screen(results.drop_duplicates(["feature","target"],keep="last"))
+    # Registry metadata is the authority for Phase/lineage/redundancy and must
+    # not be inferred from generated names.
+    registry_metadata=registry_frame(requested).drop(columns=["description","classification","dtype"],errors="ignore")
+    results=results.drop(columns=[c for c in registry_metadata.columns if c in results and c != "feature"],errors="ignore").merge(registry_metadata.rename(columns={"name":"feature"}),on="feature",how="left")
+    results["scan_kind"]=np.where(results.dtype.eq("binary"),"binary",np.where(results.dtype.eq("categorical"),"categorical","continuous"))
+    results["redundancy_group"]=results.redundancy_group.fillna(results.feature)
+    results.to_csv(checkpoint,index=False)
     if journal.exists(): journal.unlink()
     if categorical_journal.exists():categorical_journal.unlink()
     registry_frame(requested).to_csv(root/"feature_registry.csv",index=False); registry_frame(targets).to_csv(root/"target_registry.csv",index=False); results.to_csv(root/"master_results.csv",index=False)
@@ -200,6 +246,16 @@ def execute(config: ScanConfig) -> Path:
     if not exploratory.empty:results=results.merge(exploratory[["feature","target","exploratory_family_fdr"]],on=["feature","target"],how="left")
     else:results["exploratory_family_fdr"]=np.nan
     results["primary_test_count"]=int(primary.raw_p.notna().sum()); results["exploratory_test_count"]=int(exploratory.raw_p.notna().sum()); results.to_csv(root/"master_results.csv",index=False)
+    if compiled_dual:
+        parent_rows=[]
+        for item in compiled_dual:
+            dual=results.loc[results.feature.eq(item.spec.name)]
+            for parent in item.spec.parent_features:
+                parent_result=results.loc[results.feature.eq(parent)]
+                for row in dual.itertuples():
+                    match=parent_result.loc[parent_result.target.eq(row.target)]
+                    parent_rows.append({"dual_feature":item.spec.name,"parent_feature":parent,"target":row.target,"dual_effect":row.top_bottom_spread,"parent_effect":match.top_bottom_spread.iloc[0] if not match.empty else np.nan,"dual_raw_p":row.raw_p,"parent_raw_p":match.raw_p.iloc[0] if not match.empty else np.nan})
+        pd.DataFrame(parent_rows).to_csv(root/"phase1b"/"dual_parent_comparison.csv",index=False)
     assert_valid_screen_results(results,"master screen results",check_fdr=True)
     feature_path_by_name={spec.name:feature_paths[index] for index,chunk in enumerate(chunks) for spec in chunk}
     diagnostic_context_path=_build_diagnostic_context(feature_path_by_name,built_names,config,root)
@@ -233,7 +289,7 @@ def execute(config: ScanConfig) -> Path:
             key=(row.feature,row.target); feature_path=feature_path_by_name[row.feature]; target_path=target_path_by_name[row.target]
             if key not in cpu_rows:futures[cpu_pool.submit(exact_pair,feature_path,target_path,spec_by_name[row.feature],row.target,config,hints[key],diagnostic_context_path)]=("cpu",key)
             exact_end=config.selection_end if config.use_separate_confirmation_period else config.discovery_end
-            if key not in gpu_rows:futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,exact_end)]=("gpu",key)
+            if key not in gpu_rows:futures[gpu_pool.submit(gpu_dense_pair,feature_path,target_path,row.feature,row.target,config.min_bin_observations,exact_end,row.scan_kind)]=("gpu",key)
         pending=set(futures)
         while pending:
             finished,pending=wait(pending,return_when=FIRST_COMPLETED)
@@ -262,7 +318,7 @@ def execute(config: ScanConfig) -> Path:
         detailed["bh_fdr_p"]=detailed["screen_bh_fdr_p_global"]
         detailed=apply_confirmation_fdr(detailed,config)
         detailed=_classify_detailed_candidates(detailed,config)
-        detailed["effect_size_score"]=detailed.top_bottom_spread.abs().rank(pct=True); detailed["global_fdr_score"]=(1-detailed.bh_fdr_p.fillna(1)).clip(0,1); detailed["quantile_shape_score"]=detailed.monotonicity.abs().fillna(0); detailed["session_stability_score"]=detailed.year_consistency.fillna(0); detailed["symbol_breadth_score"]=detailed.symbol_breadth.fillna(0); detailed["outlier_robustness_score"]=(detailed.outlier_worst_signed_spread.fillna(0)>0).astype(float); detailed["historical_stability_score"]=detailed.get("historical_subperiod_positive_fold_pct",pd.Series(0,index=detailed.index)).fillna(0); detailed["recent_relevance_score"]=detailed.get("recent_12m_effect",pd.Series(0,index=detailed.index)).gt(0).astype(float); detailed["redundancy_penalty"]=detailed.groupby("candidate_cluster").cumcount()*.05; detailed["complexity_penalty"]=detailed.feature.str.count("_")*.005
+        detailed["effect_size_score"]=detailed.top_bottom_spread.abs().rank(pct=True); detailed["global_fdr_score"]=(1-detailed.bh_fdr_p.fillna(1)).clip(0,1); detailed["quantile_shape_score"]=np.where(detailed.get("scan_kind",pd.Series("continuous",index=detailed.index)).eq("binary"),1.0,detailed.monotonicity.abs().fillna(0)); detailed["session_stability_score"]=detailed.year_consistency.fillna(0); detailed["symbol_breadth_score"]=detailed.symbol_breadth.fillna(0); detailed["outlier_robustness_score"]=(detailed.outlier_worst_signed_spread.fillna(0)>0).astype(float); detailed["historical_stability_score"]=detailed.get("historical_subperiod_positive_fold_pct",pd.Series(0,index=detailed.index)).fillna(0); detailed["recent_relevance_score"]=detailed.get("recent_12m_effect",pd.Series(0,index=detailed.index)).gt(0).astype(float); detailed["redundancy_penalty"]=detailed.groupby("candidate_cluster").cumcount()*.05; detailed["complexity_penalty"]=detailed.get("complexity_units",pd.Series(1,index=detailed.index)).fillna(1).astype(float)*.005
         detailed["anomaly_score"]=.2*detailed.effect_size_score+.2*detailed.global_fdr_score+.1*detailed.quantile_shape_score+.1*detailed.session_stability_score+.1*detailed.symbol_breadth_score+.1*detailed.outlier_robustness_score+.1*detailed.historical_stability_score+.1*detailed.recent_relevance_score-detailed.redundancy_penalty-detailed.complexity_penalty
         detailed=detailed.sort_values("anomaly_score",ascending=False)
         from .diagnostics import phase2_recommendation
@@ -310,7 +366,8 @@ def _classify_detailed_candidates(detailed,config:ScanConfig|None=None):
     global_fdr=result.get("screen_bh_fdr_p_global",pd.Series(np.nan,index=result.index,dtype=float)).lt(config.primary_fdr_threshold)
     stable=result.get("year_consistency",pd.Series(np.nan,index=result.index,dtype=float)).ge(.6)&result.get("symbol_breadth",pd.Series(np.nan,index=result.index,dtype=float)).ge(.6)
     economic=result.get("top_bottom_spread",pd.Series(np.inf,index=result.index)).abs().ge(config.minimum_effect_bps/10000)
-    shape=result.get("monotonicity",pd.Series(0,index=result.index)).abs().ge(.5)
+    binary=result.get("scan_kind",pd.Series("continuous",index=result.index)).eq("binary")
+    shape=binary|result.get("monotonicity",pd.Series(0,index=result.index)).abs().ge(.5)
     outlier=result.get("outlier_worst_signed_spread",pd.Series(-np.inf,index=result.index)).gt(0)
     breadth=~result.get("symbol_breadth_classification",pd.Series("insufficient_evidence",index=result.index)).isin(["highly_concentrated","single_symbol_dominated","insufficient_evidence"])
     recent=result.get("recent_12m_effect",pd.Series(np.nan,index=result.index)).gt(0)

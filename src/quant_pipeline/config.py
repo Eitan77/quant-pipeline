@@ -97,6 +97,23 @@ class ScanConfig:
     market_wide_max_group_share: float = 0.40
     specific_scope_min_group_share: float = 0.60
     cache_schema_version: str = "phase1_final"
+    # Phase 1B dual-factor discovery.  Disabled by default so Phase 1A runs
+    # retain their current registry, cache, and scan behaviour.
+    dual_factor_enabled: bool = False
+    dual_factor_manifest_path: str | None = None
+    dual_factor_feature_chunk_size: int = 32
+    dual_factor_max_generated_features: int = 500
+    dual_factor_emit_parent_conditions: bool = True
+    dual_factor_cache_subdir: str = "phase1b_dual_features"
+    dual_factor_min_signal_observations: int = 100
+    dual_factor_min_signal_sessions: int = 50
+    dual_factor_min_signal_symbols: int = 10
+    dual_factor_min_activation_rate: float = 0.0005
+    dual_factor_max_activation_rate: float = 0.9995
+    dual_factor_allowed_operators: list[str] = field(default_factory=lambda: ["intersection", "gated_anchor", "aligned_rank_mean", "persistence_intersection"])
+    binary_semantics_validation: str = "error"
+    scan_schema_version: str = "phase1ab_v2"
+    dual_cache_schema_version: str = "phase1b_v2"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ScanConfig":
@@ -122,3 +139,9 @@ class ScanConfig:
         if self.target_build_batch_chunks<=0:raise ValueError("target_build_batch_chunks must be positive")
         if self.cuda_target_batch_group_size<=0:raise ValueError("cuda_target_batch_group_size must be positive")
         if self.cache_validation_workers<=0:raise ValueError("cache_validation_workers must be positive")
+        if self.dual_factor_feature_chunk_size<=0:raise ValueError("dual_factor_feature_chunk_size must be positive")
+        if self.dual_factor_max_generated_features<=0:raise ValueError("dual_factor_max_generated_features must be positive")
+        if not 0 <= self.dual_factor_min_activation_rate < self.dual_factor_max_activation_rate <= 1:
+            raise ValueError("dual-factor activation-rate bounds must satisfy 0 <= min < max <= 1")
+        if self.binary_semantics_validation not in {"error", "warn", "off"}:
+            raise ValueError("binary_semantics_validation must be error, warn, or off")

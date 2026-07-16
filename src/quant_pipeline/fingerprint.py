@@ -22,7 +22,7 @@ def file_hash(path:str|Path|None)->str|None:
     return digest.hexdigest()
 
 
-def run_fingerprint(config:ScanConfig,features:list[FeatureSpec],targets:list[TargetSpec],git_revision:str|None)->dict:
+def run_fingerprint(config:ScanConfig,features:list[FeatureSpec],targets:list[TargetSpec],git_revision:str|None,extra_components:dict|None=None)->dict:
     provenance=source_provenance(config)
     package_root=Path(__file__).parent
     source_digest=hashlib.sha256()
@@ -42,6 +42,8 @@ def run_fingerprint(config:ScanConfig,features:list[FeatureSpec],targets:list[Ta
         "calendar_package_version":exchange_calendars.__version__,
         "calendar_name":config.exchange_calendar,
     }
+    if extra_components:
+        components["extra_components"] = extra_components
     encoded=json.dumps(components,sort_keys=True,default=str,separators=(",",":")).encode()
     return {"sha256":hashlib.sha256(encoded).hexdigest(),"components":components}
 

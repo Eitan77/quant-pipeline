@@ -58,6 +58,13 @@ def exact_pair(
             expected=np.sign(direction_hint or row.get("spearman",0)); row.update(_confirmation_gate(float(row.get("top_bottom_spread",np.nan)),c.to_dict(),expected,config))
         elif config.use_separate_confirmation_period:row.update(_confirmation_gate(float(row.get("top_bottom_spread",np.nan)),{},np.sign(direction_hint or row.get("spearman",0)),config))
         direction=direction_hint or row.get("spearman",0)
+        # The legacy descriptive routines are decile-based.  Binary candidates
+        # keep their exact on/off effect and table instead of being coerced into
+        # artificial deciles; their binary-specific diagnostics are added in
+        # the reporting layer.
+        if spec.dtype == "binary":
+            row["binary_diagnostics_status"]="on_off_effect_only"
+            return row,table,diagnostic_tables
         if config.run_historical_walk_forward_diagnostics:row.update(_historical_subperiod_diagnostics(full,spec.name,target,direction))
         if config.run_recent_period_diagnostics:
             summary,table=recent_period_diagnostics(full,spec.name,target,direction,config); row.update(summary); diagnostic_tables["recent_periods"]=table.to_dict("records")

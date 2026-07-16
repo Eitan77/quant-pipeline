@@ -31,7 +31,7 @@ def build_cuda_feature_context(
     config: ScanConfig,
 ) -> CudaFeatureContext:
     import torch
-    active=[s for s in features if s.classification!="categorical" and s.dtype!="categorical"]
+    active=[s for s in features if s.classification!="categorical" and s.dtype not in {"categorical", "binary"}]
     device=torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
     names=tuple(s.name for s in active)
     x_np=feature_frame[list(names)].to_numpy(dtype=np.float32,copy=True)
@@ -65,7 +65,7 @@ def cuda_screen(
 ) -> pd.DataFrame:
     """Vectorized all-pair screen; exact diagnostics are reserved for survivors."""
     completed={(r.feature,r.target) for r in prior.itertuples()} if not prior.empty else set()
-    active_features=[s for s in features if s.classification!="categorical" and s.dtype!="categorical" and any((s.name,t) not in completed for t in targets)]
+    active_features=[s for s in features if s.classification!="categorical" and s.dtype not in {"categorical", "binary"} and any((s.name,t) not in completed for t in targets)]
     if not active_features: return prior
     import torch
     feature_names=[s.name for s in active_features]
