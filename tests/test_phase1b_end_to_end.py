@@ -251,3 +251,13 @@ def test_standalone_and_normal_exact_candidate_queues_match():
     normal=set(map(tuple,_cluster_candidates(results,None,config,250)[["feature","target"]].to_numpy()))
     standalone=set(map(tuple,select_exact_candidate_queue(results,config,None,250)[["feature","target"]].to_numpy()))
     assert normal==standalone
+
+
+def test_built_dual_rows_without_valid_inference_fail(tmp_path,monkeypatch):
+    source,_,config=_source(tmp_path)
+    invalid=pd.DataFrame({"feature":["dual_test_feature"],"target":["target_5m"],"raw_p":[np.nan],"status":["insufficient_data"]})
+    monkeypatch.setattr("quant_pipeline.phase1b_run.screen_feature_blocks_against_target_blocks",lambda **_:invalid)
+    with pytest.raises(RuntimeError,match="no feature-target pair produced valid statistical inference"):
+        run_phase1b(source,config)
+    output=Path(config.output_root)/config.experiment_id/"manifest.json"
+    assert not output.exists() or json.loads(output.read_text()).get("promotion_ready") is not True
