@@ -7,10 +7,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .cache import ROW_KEYS, assert_cache_key_alignment, validate_cache, write_cache_metadata
+from .cache import ROW_KEYS, assert_cache_key_alignment, validate_cache, write_aligned_derived_cache_metadata
 from .config import ScanConfig
 from .dual_registry import CompiledDualFeature, ConditionSpec, TransformSpec
-from .holdout import assert_pre_holdout_frame
 from .registry import FeatureSpec
 from .binary_coverage import binary_coverage, build_status
 
@@ -45,7 +44,8 @@ def _transform(frame: pd.DataFrame, value: pd.Series, transform: TransformSpec |
     if transform.kind == "raw":
         out = pd.to_numeric(value, errors="coerce")
     elif transform.kind == "cross_sectional_rank":
-        out = eligible_cross_sectional_rank(frame,pd.to_numeric(value,errors="coerce"),min_symbols=config.cross_sectional_min_symbols)
+        cached=f"__dual_rank__{value.name}"
+        out = pd.to_numeric(frame[cached],errors="coerce") if cached in frame else eligible_cross_sectional_rank(frame,pd.to_numeric(value,errors="coerce"),min_symbols=config.cross_sectional_min_symbols)
     else:
         raise ValueError(f"Unsupported dual transform: {transform.kind}")
     return centered_oriented_rank(out,transform.orientation) if centered and transform.kind=="cross_sectional_rank" else out*transform.orientation
@@ -115,6 +115,7 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
     chunks = [compiled[i:i + config.dual_factor_feature_chunk_size] for i in range(0, len(compiled), config.dual_factor_feature_chunk_size)]
     paths: list[Path] = []; specs_by_chunk: list[list[FeatureSpec]] = []; coverage: list[dict] = []
     memo: dict[Path, pd.DataFrame] = {}
+    rank_memo: dict[str, np.ndarray] = {}
     required_by_path: dict[Path, set[str]] = {}
     for item in compiled:
         for parent in item.spec.parent_features:
@@ -142,20 +143,28 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
                 parent_path = feature_path_by_name[parent]
                 source_frame = parent_frame(parent_path)
                 frame[parent] = source_frame[parent].to_numpy()
-            assert_pre_holdout_frame(frame, config.sealed_holdout_start, "dual feature materialization")
+            ranked_parents=set()
+            for item in chunk:
+                definition=item.definition
+                if (definition.transform_a and definition.transform_a.kind=="cross_sectional_rank") or (definition.condition_a and definition.condition_a.transform=="cross_sectional_rank"):ranked_parents.add(definition.feature_a)
+                if (definition.transform_b and definition.transform_b.kind=="cross_sectional_rank") or (definition.condition_b and definition.condition_b.transform=="cross_sectional_rank"):ranked_parents.add(definition.feature_b)
+            for parent in sorted(ranked_parents):
+                if parent not in rank_memo:rank_memo[parent]=eligible_cross_sectional_rank(frame,frame[parent],min_symbols=config.cross_sectional_min_symbols).to_numpy()
+                frame[f"__dual_rank__{parent}"]=rank_memo[parent]
             for item in chunk:
                 frame[item.spec.name] = _materialize(frame, item, config)
             keep = [col for col in frame.columns if col in ROW_KEYS or col in {"session_date", "analysis_eligible", "symbol", "bar_start_ts", "decision_ts"} or col in {s.name for s in specs}]
             frame = frame.loc[:, list(dict.fromkeys(keep))]
             temporary=path.with_suffix(path.suffix+".tmp");frame.to_parquet(temporary,index=False);temporary.replace(path)
-            write_cache_metadata(path, frame, fingerprint_sha, config.sealed_holdout_start)
+            source_metadata=json.loads(first.with_suffix(first.suffix+".meta.json").read_text(encoding="utf-8"))
+            write_aligned_derived_cache_metadata(path,frame,fingerprint_sha,source_metadata,config.sealed_holdout_start)
         built_specs=[]
         for spec in specs:
             signal = pd.to_numeric(frame[spec.name], errors="coerce")
             eligible=frame.get("analysis_eligible",pd.Series(True,index=frame.index)).fillna(False).astype(bool)
             valid=signal.notna()&eligible
             if spec.dtype=="binary":
-                metrics=binary_coverage(frame,spec.name).as_dict();status,reason=build_status(binary_coverage(frame,spec.name),config)
+                binary_metrics=binary_coverage(frame,spec.name);metrics=binary_metrics.as_dict();status,reason=build_status(binary_metrics,config)
             else:status,reason=("built",None) if valid.any() else ("skipped","insufficient_valid_observations")
             if spec.dtype!="binary":metrics={"valid_observations":int(valid.sum()),"activation_rate":np.nan,"signal_on_count":0,"signal_off_count":0,"signal_on_sessions":0,"signal_off_sessions":0,"signal_on_symbols":0,"signal_off_symbols":0,"signal_on_decision_timestamps":0,"signal_off_decision_timestamps":0}
             coverage.append({"feature":spec.name,"status":status,"skip_reason":reason,**metrics})

@@ -49,6 +49,27 @@ def write_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str,sealed_hol
     metadata_path=path.with_suffix(path.suffix+".meta.json");temporary=metadata_path.with_suffix(metadata_path.suffix+".tmp");temporary.write_text(json.dumps(metadata,indent=2),encoding="utf-8");temporary.replace(metadata_path); return metadata
 
 
+def write_aligned_derived_cache_metadata(path:Path,frame:pd.DataFrame,fingerprint:str,source_key_metadata:dict,sealed_holdout_start:str="2026-05-01")->dict:
+    """Validate a derived block against already-verified immutable row keys.
+
+    Derived Phase 1B blocks copy their keys byte-for-byte from an aligned source
+    cache.  Re-reading and re-hashing millions of identical keys for every
+    feature chunk adds no validation strength, so verify row count, boundary,
+    endpoint keys, schema and file digest while reusing the source key hash.
+    """
+    import pyarrow.parquet as pq
+    # Timestamp columns are copied unchanged from the already validated source
+    # block; Parquet statistics below fail closed on the persisted boundary.
+    assert_pre_holdout_parquet(path,sealed_holdout_start,f"cache write {path}",verify_key_rows=False)
+    rows=pq.ParquetFile(path).metadata.num_rows
+    if rows!=len(frame) or rows!=source_key_metadata.get("row_count"):raise ValueError(f"Derived cache row count mismatch: {path}")
+    first=[str(x) for x in frame[ROW_KEYS].iloc[0]] if rows else None;last=[str(x) for x in frame[ROW_KEYS].iloc[-1]] if rows else None
+    if first!=source_key_metadata.get("first_key") or last!=source_key_metadata.get("last_key"):raise ValueError(f"Derived cache endpoint keys mismatch: {path}")
+    if _parquet_schema_hash(path)!=schema_hash(frame):raise ValueError(f"Derived cache schema mismatch: {path}")
+    metadata={"fingerprint":fingerprint,"row_count":rows,"first_key":first,"last_key":last,"row_key_hash":source_key_metadata["row_key_hash"],"column_schema_hash":schema_hash(frame),"file_size":path.stat().st_size,"file_sha256":file_sha256(path),"aligned_source_key_validation":True}
+    metadata_path=path.with_suffix(path.suffix+".meta.json");temporary=metadata_path.with_suffix(metadata_path.suffix+".tmp");temporary.write_text(json.dumps(metadata,indent=2),encoding="utf-8");temporary.replace(metadata_path);return metadata
+
+
 def validate_cache(path:Path,fingerprint:str,sealed_holdout_start:str="2026-05-01")->dict:
     metadata_path=path.with_suffix(path.suffix+".meta.json")
     if not metadata_path.exists():raise CacheFingerprintMismatch(f"Cache metadata missing: {path}")
