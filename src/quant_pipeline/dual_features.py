@@ -115,6 +115,15 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
     chunks = [compiled[i:i + config.dual_factor_feature_chunk_size] for i in range(0, len(compiled), config.dual_factor_feature_chunk_size)]
     paths: list[Path] = []; specs_by_chunk: list[list[FeatureSpec]] = []; coverage: list[dict] = []
     memo: dict[Path, pd.DataFrame] = {}
+    required_by_path: dict[Path, set[str]] = {}
+    for item in compiled:
+        for parent in item.spec.parent_features:
+            required_by_path.setdefault(feature_path_by_name[parent],set()).add(parent)
+    def parent_frame(path:Path)->pd.DataFrame:
+        if path not in memo:
+            columns=list(dict.fromkeys([*ROW_KEYS,"session_date","analysis_eligible","symbol","bar_start_ts","decision_ts",*sorted(required_by_path[path])]))
+            memo[path]=pd.read_parquet(path,columns=columns)
+        return memo[path]
     for index, chunk in enumerate(chunks):
         path = output_root / f"dual_{index:03d}.parquet"; specs = [item.spec for item in chunk]
         paths.append(path); specs_by_chunk.append(specs)
@@ -127,12 +136,12 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
             first = next(iter(parent_paths))
             for parent_path in parent_paths:
                 assert_cache_key_alignment(first, parent_path)
-            base = memo.setdefault(first, pd.read_parquet(first))
+            base = parent_frame(first)
             frame = base.loc[:, [col for col in base.columns if col in ROW_KEYS or col in {"session_date", "analysis_eligible", "symbol", "bar_start_ts", "decision_ts"}]].copy()
             for parent in parents:
                 parent_path = feature_path_by_name[parent]
-                parent_frame = memo.setdefault(parent_path, pd.read_parquet(parent_path, columns=[*ROW_KEYS, parent]))
-                frame[parent] = parent_frame[parent].to_numpy()
+                source_frame = parent_frame(parent_path)
+                frame[parent] = source_frame[parent].to_numpy()
             assert_pre_holdout_frame(frame, config.sealed_holdout_start, "dual feature materialization")
             for item in chunk:
                 frame[item.spec.name] = _materialize(frame, item, config)

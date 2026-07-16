@@ -275,7 +275,8 @@ def test_systematic_only_end_to_end_keeps_source_immutable_and_separates_fdr(tmp
     parent=replace(config.systematic_phase1b.parent_selection,minimum_valid_observations=4,minimum_sessions=2,minimum_symbols=2,minimum_decision_timestamps=2)
     pair=replace(config.systematic_phase1b.pair_generation,minimum_joint_observations=4,minimum_joint_sessions=2,minimum_joint_symbols=2,minimum_joint_decision_timestamps=2)
     binary=replace(config.systematic_phase1b.binary_state_coverage,minimum_on_observations=2,minimum_off_observations=2,minimum_on_sessions=1,minimum_off_sessions=1,minimum_on_symbols=1,minimum_off_symbols=1,minimum_activation_rate=0,maximum_activation_rate=1)
-    config=replace(config,systematic_phase1b=replace(config.systematic_phase1b,parent_selection=parent,pair_generation=pair,binary_state_coverage=binary))
+    limits=replace(config.systematic_phase1b.limits,feature_chunk_size=1)
+    config=replace(config,systematic_phase1b=replace(config.systematic_phase1b,parent_selection=parent,pair_generation=pair,binary_state_coverage=binary,limits=limits))
     before=_tree_hash(source);root=run_phase1b(source,config)
     assert _tree_hash(source)==before
     systematic=pd.read_csv(root/"phase1b"/"systematic"/"screen_results.csv")
