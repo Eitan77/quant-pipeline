@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +13,7 @@ from .cache import ROW_KEYS, assert_cache_key_alignment, validate_cache, write_a
 from .config import ScanConfig
 from .dual_registry import CompiledDualFeature, ConditionSpec, TransformSpec
 from .registry import FeatureSpec
-from .binary_coverage import binary_coverage, build_status
+from .binary_coverage import BinaryCoverage, build_status
 
 
 def build_feature_cache_index(feature_paths: list[Path], specs_by_chunk: list[list[FeatureSpec]]) -> dict[str, Path]:
@@ -104,6 +106,91 @@ def _materialize(frame: pd.DataFrame, compiled: CompiledDualFeature, config: Sca
     raise ValueError(f"Unsupported dual operator: {item.operator}")
 
 
+def _materialize_group_from_cached_ranks(
+    frame: pd.DataFrame,
+    compiled: list[CompiledDualFeature],
+    config: ScanConfig,
+) -> dict[str, np.ndarray]:
+    """Materialize one parent pair while reusing its arrays and predicates."""
+    arrays: dict[tuple[str, str], np.ndarray] = {}
+    transforms: dict[tuple[str, str, int, bool], np.ndarray] = {}
+    conditions: dict[tuple[str, str, str, float], tuple[np.ndarray, np.ndarray]] = {}
+
+    def values(name: str, kind: str) -> np.ndarray:
+        key = (name, kind)
+        if key not in arrays:
+            column = f"__dual_rank__{name}" if kind == "cross_sectional_rank" else name
+            arrays[key] = frame[column].to_numpy(dtype=float, copy=False)
+        return arrays[key]
+
+    def transform(name: str, spec: TransformSpec | None, centered: bool = False) -> np.ndarray:
+        spec = spec or TransformSpec()
+        key = (name, spec.kind, spec.orientation, centered)
+        if key not in transforms:
+            source = values(name, spec.kind)
+            if centered and spec.kind == "cross_sectional_rank":
+                transforms[key] = spec.orientation * (2.0 * source - 1.0)
+            elif spec.orientation == 1:
+                transforms[key] = source
+            else:
+                transforms[key] = -source
+        return transforms[key]
+
+    def condition(name: str, spec: ConditionSpec | None) -> tuple[np.ndarray, np.ndarray]:
+        if spec is None:
+            raise ValueError("A dual condition is required")
+        key = (name, spec.transform, spec.comparator, spec.threshold)
+        if key not in conditions:
+            source = values(name, spec.transform)
+            finite = np.isfinite(source)
+            operations = {
+                "ge": np.greater_equal,
+                "gt": np.greater,
+                "le": np.less_equal,
+                "lt": np.less,
+                "eq": np.equal,
+            }
+            conditions[key] = (operations[spec.comparator](source, spec.threshold), finite)
+        return conditions[key]
+
+    output: dict[str, np.ndarray] = {}
+    for item in compiled:
+        definition = item.definition
+        if definition.operator == "intersection":
+            left, left_finite = condition(definition.feature_a, definition.condition_a)
+            right, right_finite = condition(definition.feature_b, definition.condition_b)
+            result = np.full(len(frame), np.nan, dtype=float)
+            valid = left_finite & right_finite
+            result[valid] = left[valid] & right[valid]
+        elif definition.operator == "gated_anchor":
+            anchor = transform(definition.feature_a, definition.transform_a)
+            gate, gate_finite = condition(definition.feature_b, definition.condition_b)
+            result = np.full(len(frame), np.nan, dtype=float)
+            active = gate_finite & gate
+            result[active] = anchor[active]
+        elif definition.operator == "aligned_rank_mean":
+            left = transform(definition.feature_a, definition.transform_a, True)
+            right = transform(definition.feature_b, definition.transform_b, True)
+            result = (left + right) / 2.0
+        else:
+            result = _materialize(frame, item, config).to_numpy()
+        output[item.spec.name] = result
+    return output
+
+
+def _binary_coverage_from_codes(frame:pd.DataFrame,names:list[str],group_codes:tuple[np.ndarray,np.ndarray,np.ndarray])->dict[str,BinaryCoverage]:
+    eligible=frame.get("analysis_eligible",pd.Series(True,index=frame.index)).fillna(False).to_numpy(dtype=bool,copy=False);result={}
+    group_sizes=[int(codes.max())+1 for codes in group_codes]
+    def distinct(mask:np.ndarray,codes:np.ndarray,size:int)->int:
+        return int(np.count_nonzero(np.bincount(codes[mask],minlength=size)))
+    for name in names:
+        values=pd.to_numeric(frame[name],errors="coerce").to_numpy(dtype=float,copy=False);valid=eligible&np.isfinite(values)
+        if not np.isin(values[valid],[0.0,1.0]).all():raise ValueError(f"Binary feature contains values outside 0/1: {name}")
+        on=valid&(values==1);off=valid&(values==0);on_groups=[distinct(on,codes,size) for codes,size in zip(group_codes,group_sizes)];off_groups=[distinct(off,codes,size) for codes,size in zip(group_codes,group_sizes)];n=int(np.count_nonzero(valid));on_count=int(np.count_nonzero(on));off_count=int(np.count_nonzero(off))
+        result[name]=BinaryCoverage(valid_observations=n,signal_on_count=on_count,signal_off_count=off_count,signal_on_sessions=on_groups[0],signal_off_sessions=off_groups[0],signal_on_symbols=on_groups[1],signal_off_symbols=off_groups[1],signal_on_decision_timestamps=on_groups[2],signal_off_decision_timestamps=off_groups[2],activation_rate=float(on_count/n) if n else np.nan)
+    return result
+
+
 def binary_build_status(metrics: dict, config: ScanConfig) -> tuple[str,str|None]:
     from .binary_coverage import BinaryCoverage
     return build_status(BinaryCoverage(**metrics),config)
@@ -116,6 +203,7 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
     paths: list[Path] = []; specs_by_chunk: list[list[FeatureSpec]] = []; coverage: list[dict] = []
     memo: dict[Path, pd.DataFrame] = {}
     rank_memo: dict[str, np.ndarray] = {}
+    group_codes: tuple[np.ndarray,np.ndarray,np.ndarray]|None = None
     required_by_path: dict[Path, set[str]] = {}
     for item in compiled:
         for parent in item.spec.parent_features:
@@ -139,6 +227,7 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
                 assert_cache_key_alignment(first, parent_path)
             base = parent_frame(first)
             frame = base.loc[:, [col for col in base.columns if col in ROW_KEYS or col in {"session_date", "analysis_eligible", "symbol", "bar_start_ts", "decision_ts"}]].copy()
+            if group_codes is None:group_codes=tuple(pd.factorize(frame[column],sort=False)[0].astype(np.int32,copy=False) for column in ("session_date","symbol","decision_ts"))
             for parent in parents:
                 parent_path = feature_path_by_name[parent]
                 source_frame = parent_frame(parent_path)
@@ -151,20 +240,38 @@ def build_dual_feature_chunks(compiled: list[CompiledDualFeature], feature_path_
             for parent in sorted(ranked_parents):
                 if parent not in rank_memo:rank_memo[parent]=eligible_cross_sectional_rank(frame,frame[parent],min_symbols=config.cross_sectional_min_symbols).to_numpy()
                 frame[f"__dual_rank__{parent}"]=rank_memo[parent]
+            groups: dict[str, list[CompiledDualFeature]] = {}
             for item in chunk:
-                frame[item.spec.name] = _materialize(frame, item, config)
-            keep = [col for col in frame.columns if col in ROW_KEYS or col in {"session_date", "analysis_eligible", "symbol", "bar_start_ts", "decision_ts"} or col in {s.name for s in specs}]
-            frame = frame.loc[:, list(dict.fromkeys(keep))]
+                groups.setdefault(item.spec.redundancy_group, []).append(item)
+            workers = min(8, len(groups), os.cpu_count() or 1)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                pieces = executor.map(
+                    lambda group: _materialize_group_from_cached_ranks(frame, group, config),
+                    groups.values(),
+                )
+                generated = {name: values for piece in pieces for name, values in piece.items()}
+            generated_frame = pd.DataFrame(generated, index=frame.index)
+            keys = list(dict.fromkeys([
+                col for col in frame.columns
+                if col in ROW_KEYS or col in {"session_date", "analysis_eligible", "symbol", "bar_start_ts", "decision_ts"}
+            ]))
+            frame = pd.concat(
+                [frame.loc[:, keys], generated_frame],
+                axis=1,
+                copy=False,
+            )
             temporary=path.with_suffix(path.suffix+".tmp");frame.to_parquet(temporary,index=False);temporary.replace(path)
             source_metadata=json.loads(first.with_suffix(first.suffix+".meta.json").read_text(encoding="utf-8"))
             write_aligned_derived_cache_metadata(path,frame,fingerprint_sha,source_metadata,config.sealed_holdout_start)
-        built_specs=[]
+        built_specs=[];binary_names=[spec.name for spec in specs if spec.dtype=="binary"]
+        if group_codes is None:group_codes=tuple(pd.factorize(frame[column],sort=False)[0].astype(np.int32,copy=False) for column in ("session_date","symbol","decision_ts"))
+        binary_metrics_by_name=_binary_coverage_from_codes(frame,binary_names,group_codes) if binary_names else {}
         for spec in specs:
             signal = pd.to_numeric(frame[spec.name], errors="coerce")
             eligible=frame.get("analysis_eligible",pd.Series(True,index=frame.index)).fillna(False).astype(bool)
             valid=signal.notna()&eligible
             if spec.dtype=="binary":
-                binary_metrics=binary_coverage(frame,spec.name);metrics=binary_metrics.as_dict();status,reason=build_status(binary_metrics,config)
+                binary_metrics=binary_metrics_by_name[spec.name];metrics=binary_metrics.as_dict();status,reason=build_status(binary_metrics,config)
             else:status,reason=("built",None) if valid.any() else ("skipped","insufficient_valid_observations")
             if spec.dtype!="binary":metrics={"valid_observations":int(valid.sum()),"activation_rate":np.nan,"signal_on_count":0,"signal_off_count":0,"signal_on_sessions":0,"signal_off_sessions":0,"signal_on_symbols":0,"signal_off_symbols":0,"signal_on_decision_timestamps":0,"signal_off_decision_timestamps":0}
             coverage.append({"feature":spec.name,"status":status,"skip_reason":reason,**metrics})
