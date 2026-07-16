@@ -137,6 +137,134 @@ def cuda_screen(
     return out
 
 
+def cuda_binary_scan_batch(
+    frame: pd.DataFrame,
+    features: list[FeatureSpec],
+    targets: list[str],
+    config: ScanConfig,
+) -> pd.DataFrame:
+    """Exact binary on/off effects with batched two-way cluster inference on CUDA."""
+    if not features:
+        return pd.DataFrame()
+    import torch
+
+    device = torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
+    eligible = frame.analysis_eligible.fillna(False).to_numpy(bool) if "analysis_eligible" in frame else np.ones(len(frame), bool)
+    x_np = frame[[item.name for item in features]].to_numpy(dtype=np.float64, copy=True)
+    finite_x = torch.as_tensor(np.isfinite(x_np) & eligible[:, None], device=device)
+    x_on = torch.as_tensor(np.nan_to_num(x_np, nan=0.0).astype(bool), device=device) & finite_x
+    session_np = frame.session_date.astype(str).to_numpy()
+    symbol_np = frame.symbol.astype(str).to_numpy()
+    decision_np = frame.decision_ts.astype(str).to_numpy()
+    year_np = pd.to_datetime(frame.session_date).dt.year.to_numpy()
+    intersection_np = pd.MultiIndex.from_arrays([session_np, symbol_np])
+    code_arrays = {
+        "sessions": pd.factorize(session_np, sort=False)[0],
+        "symbols": pd.factorize(symbol_np, sort=False)[0],
+        "decisions": pd.factorize(decision_np, sort=False)[0],
+        "years": pd.factorize(year_np, sort=False)[0],
+        "intersection": pd.factorize(intersection_np, sort=False)[0],
+    }
+    codes = {name: torch.as_tensor(value, device=device, dtype=torch.long) for name, value in code_arrays.items()}
+
+    def grouped(
+        valid: torch.Tensor,
+        on: torch.Tensor,
+        y: torch.Tensor,
+        name: str,
+        beta0: torch.Tensor,
+        beta1: torch.Tensor,
+        *,
+        covariance: bool,
+    ):
+        group_codes = codes[name]
+        groups = int(group_codes.max().item()) + 1
+        width = valid.shape[1]
+        counts = torch.zeros((groups, width), device=device, dtype=torch.float64)
+        on_counts = torch.zeros_like(counts)
+        counts.index_add_(0, group_codes, valid.to(torch.float64))
+        on_counts.index_add_(0, group_codes, on.to(torch.float64))
+        valid_groups = (counts > 0).sum(0)
+        on_groups = (on_counts > 0).sum(0)
+        off_groups = ((counts - on_counts) > 0).sum(0)
+        if not covariance:
+            return None, valid_groups, on_groups, off_groups
+        sum_y = torch.zeros_like(counts)
+        sum_xy = torch.zeros_like(counts)
+        sum_y.index_add_(0, group_codes, torch.where(valid, y[:, None], 0.0))
+        sum_xy.index_add_(0, group_codes, torch.where(on, y[:, None], 0.0))
+        score0 = sum_y - beta0 * counts - beta1 * on_counts
+        score1 = sum_xy - (beta0 + beta1) * on_counts
+        meat00 = (score0 * score0).sum(0)
+        meat01 = (score0 * score1).sum(0)
+        meat11 = (score1 * score1).sum(0)
+        return (meat00, meat01, meat11), valid_groups, on_groups, off_groups
+
+    rows = []
+    for target in targets:
+        y_np = pd.to_numeric(frame[target], errors="coerce").to_numpy(np.float64)
+        y = torch.as_tensor(np.nan_to_num(y_np, nan=0.0), device=device)
+        finite_y = torch.as_tensor(np.isfinite(y_np), device=device)
+        valid = finite_x & finite_y[:, None]
+        on = x_on & finite_y[:, None]
+        n = valid.sum(0).to(torch.float64)
+        n_on = on.sum(0).to(torch.float64)
+        n_off = n - n_on
+        sum_y = torch.where(valid, y[:, None], 0.0).sum(0)
+        sum_y2 = torch.where(valid, y[:, None] * y[:, None], 0.0).sum(0)
+        sum_xy = torch.where(on, y[:, None], 0.0).sum(0)
+        on_mean = sum_xy / n_on.clamp_min(1)
+        off_mean = (sum_y - sum_xy) / n_off.clamp_min(1)
+        beta0 = off_mean
+        beta1 = on_mean - off_mean
+        date_meat, sessions, on_sessions, off_sessions = grouped(valid, on, y, "sessions", beta0, beta1, covariance=True)
+        symbol_meat, symbols, on_symbols, off_symbols = grouped(valid, on, y, "symbols", beta0, beta1, covariance=True)
+        intersection_meat, intersection_groups, _, _ = grouped(valid, on, y, "intersection", beta0, beta1, covariance=True)
+        _, decisions, on_decisions, off_decisions = grouped(valid, on, y, "decisions", beta0, beta1, covariance=False)
+        _, years, _, _ = grouped(valid, on, y, "years", beta0, beta1, covariance=False)
+
+        def slope_covariance(meat, group_count):
+            meat00, meat01, meat11 = meat
+            r0 = -1.0 / n_off.clamp_min(1)
+            r1 = 1.0 / n_on.clamp_min(1) + 1.0 / n_off.clamp_min(1)
+            variance = r0 * r0 * meat00 + 2.0 * r0 * r1 * meat01 + r1 * r1 * meat11
+            correction = (group_count / (group_count - 1).clamp_min(1)) * ((n - 1) / (n - 2).clamp_min(1))
+            return variance * correction
+
+        date_variance = slope_covariance(date_meat, sessions.to(torch.float64))
+        symbol_variance = slope_covariance(symbol_meat, symbols.to(torch.float64))
+        intersection_variance = slope_covariance(intersection_meat, intersection_groups.to(torch.float64))
+        variance = torch.clamp(date_variance + symbol_variance - intersection_variance, min=0.0)
+        se = torch.sqrt(variance)
+        t_value = beta1 / se
+        probabilities = torch.erfc(torch.abs(t_value) / np.sqrt(2.0))
+        mean_y = sum_y / n.clamp_min(1)
+        var_y = torch.clamp(sum_y2 / n.clamp_min(1) - mean_y * mean_y, min=0.0)
+        var_x = n_on * n_off / n.clamp_min(1)
+        covariance_xy = sum_xy - n_on * mean_y
+        pearson = covariance_xy / torch.sqrt(var_x * (sum_y2 - sum_y * mean_y)).clamp_min(1e-30)
+        values = {
+            "n": n, "n_on": n_on, "n_off": n_off, "sessions": sessions, "symbols": symbols,
+            "decisions": decisions, "years": years, "on_sessions": on_sessions, "off_sessions": off_sessions,
+            "on_symbols": on_symbols, "off_symbols": off_symbols, "on_decisions": on_decisions,
+            "off_decisions": off_decisions, "on_mean": on_mean, "off_mean": off_mean, "effect": beta1,
+            "mean_y": mean_y, "var_y": var_y, "pearson": pearson, "se": se, "t": t_value, "p": probabilities,
+        }
+        values = {name: tensor.cpu().numpy() for name, tensor in values.items()}
+        for index, spec in enumerate(features):
+            count = int(values["n"][index]); session_count = int(values["sessions"][index]); symbol_count = int(values["symbols"][index]); decision_count = int(values["decisions"][index]); year_count = int(values["years"][index])
+            base = {"feature": spec.name, "feature_family": spec.family, "feature_classification": spec.classification, "scan_kind": "binary", "discovery_phase": spec.discovery_phase, "arity": spec.arity, "operator": spec.operator, "parent_features": str(spec.parent_features), "redundancy_group": spec.redundancy_group, "target": target, "target_family": target.removesuffix("_benchmark_adjusted"), "table_rows": len(frame), "n": count, "valid_observations": count, "sessions": session_count, "valid_sessions": session_count, "symbols": symbol_count, "valid_symbols": symbol_count, "valid_decision_timestamps": decision_count, "valid_years": year_count, "raw_p": np.nan}
+            sufficient = count >= config.min_observations and session_count >= config.min_sessions and symbol_count >= config.min_symbols and decision_count >= config.min_decision_timestamps and year_count >= config.min_years
+            state_sufficient = values["n_on"][index] >= config.binary_min_on_observations and values["n_off"][index] >= config.binary_min_off_observations and values["on_sessions"][index] >= config.binary_min_on_sessions and values["off_sessions"][index] >= config.binary_min_off_sessions and values["on_symbols"][index] >= config.binary_min_on_symbols and values["off_symbols"][index] >= config.binary_min_off_symbols
+            if not sufficient or not state_sufficient:
+                rows.append({**base, "status": "insufficient_data"}); continue
+            effect = float(values["effect"][index]); standard_error = float(values["se"][index]); probability = float(np.clip(values["p"][index], 0.0, 1.0))
+            rows.append({**base, "on_count": int(values["n_on"][index]), "off_count": int(values["n_off"][index]), "signal_on_count": int(values["n_on"][index]), "signal_off_count": int(values["n_off"][index]), "signal_on_sessions": int(values["on_sessions"][index]), "signal_off_sessions": int(values["off_sessions"][index]), "signal_on_symbols": int(values["on_symbols"][index]), "signal_off_symbols": int(values["off_symbols"][index]), "signal_on_decision_timestamps": int(values["on_decisions"][index]), "signal_off_decision_timestamps": int(values["off_decisions"][index]), "activation_rate": float(values["n_on"][index] / max(count, 1)), "on_mean_target": float(values["on_mean"][index]), "off_mean_target": float(values["off_mean"][index]), "mean_target": float(values["mean_y"][index]), "median_target": np.nan, "pearson": float(values["pearson"][index]), "spearman": np.nan, "slope": effect, "cluster_se": np.nan, "cluster_t": np.nan, "date_cluster_p": np.nan, "two_way_cluster_se": standard_error, "two_way_cluster_t": float(values["t"][index]), "two_way_cluster_p": probability, "raw_p": probability, "screen_inference": "two_way_date_symbol_cuda_exact_binary", "top_bottom_spread": effect, "monotonicity": np.nan, "shape": "binary_positive" if effect > 0 else "binary_negative", "effect_kind": "binary_on_minus_off", "effect_value": effect, "status": "binary_screened"})
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return pd.DataFrame(rows)
+
+
 def _pair_coverage_counts(finite_x,finite_y,group_codes:dict[str,np.ndarray]) -> dict[str,np.ndarray]:
     """Count distinct valid groups for every feature-target pair on device."""
     import torch

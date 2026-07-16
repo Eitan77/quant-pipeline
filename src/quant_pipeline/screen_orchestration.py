@@ -11,6 +11,7 @@ import pandas as pd
 from .bulk_scan import (
     assert_valid_screen_results,
     build_cuda_feature_context,
+    cuda_binary_scan_batch,
     cuda_screen,
 )
 from .cache import assert_cache_key_alignment
@@ -121,7 +122,7 @@ def screen_feature_blocks_against_target_blocks(
                 active = binary if scanner is binary_scan_batch else categorical
                 if not active:
                     continue
-                additions = scanner(combined, active, names, config)
+                additions = cuda_binary_scan_batch(combined, active, names, config) if scanner is binary_scan_batch and config.use_cuda else scanner(combined, active, names, config)
                 completed = {(row.feature, row.target) for row in results.itertuples()}
                 additions = additions.loc[
                     [((row.feature, row.target) not in completed) for row in additions.itertuples()]
