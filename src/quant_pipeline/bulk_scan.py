@@ -25,6 +25,15 @@ class CudaFeatureContext:
     coverage_codes: dict[str, object]
 
 
+@dataclass
+class BinaryCudaContext:
+    feature_names: tuple[str, ...]
+    device: object
+    finite_x: object
+    x_on: object
+    codes: dict[str, object]
+
+
 def build_cuda_feature_context(
     feature_frame: pd.DataFrame,
     features: list[FeatureSpec],
@@ -51,6 +60,34 @@ def build_cuda_feature_context(
     sample=np.linspace(0,len(feature_frame)-1,min(len(feature_frame),200_000),dtype=np.int64)
     rx=_percentile_bins(tx,x_np[sample],100)
     return CudaFeatureContext(names,device,tx,rx,torch.isfinite(tx),codes["sessions"],codes)
+
+
+def build_cuda_binary_context(
+    feature_frame: pd.DataFrame,
+    features: list[FeatureSpec],
+    config: ScanConfig,
+) -> BinaryCudaContext:
+    """Build feature and cluster tensors once for every target batch."""
+    import torch
+    device = torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
+    names = tuple(item.name for item in features)
+    eligible = feature_frame.analysis_eligible.fillna(False).to_numpy(bool) if "analysis_eligible" in feature_frame else np.ones(len(feature_frame), bool)
+    x_np = feature_frame[list(names)].to_numpy(dtype=np.float64, copy=True)
+    finite_x = torch.as_tensor(np.isfinite(x_np) & eligible[:, None], device=device)
+    x_on = torch.as_tensor(np.nan_to_num(x_np, nan=0.0).astype(bool), device=device) & finite_x
+    session_codes = pd.factorize(feature_frame.session_date.astype(str), sort=False)[0]
+    symbol_codes = pd.factorize(feature_frame.symbol.astype(str), sort=False)[0]
+    decision_codes = pd.factorize(feature_frame.decision_ts.astype(str), sort=False)[0]
+    year_codes = pd.factorize(pd.to_datetime(feature_frame.session_date).dt.year, sort=False)[0]
+    intersection_codes = session_codes * (int(symbol_codes.max()) + 1) + symbol_codes
+    codes = {
+        "sessions": torch.as_tensor(session_codes, device=device, dtype=torch.long),
+        "symbols": torch.as_tensor(symbol_codes, device=device, dtype=torch.long),
+        "decisions": torch.as_tensor(decision_codes, device=device, dtype=torch.long),
+        "years": torch.as_tensor(year_codes, device=device, dtype=torch.long),
+        "intersection": torch.as_tensor(intersection_codes, device=device, dtype=torch.long),
+    }
+    return BinaryCudaContext(names, device, finite_x, x_on, codes)
 
 
 def cuda_screen(
@@ -142,30 +179,21 @@ def cuda_binary_scan_batch(
     features: list[FeatureSpec],
     targets: list[str],
     config: ScanConfig,
+    context: BinaryCudaContext | None = None,
 ) -> pd.DataFrame:
     """Exact binary on/off effects with batched two-way cluster inference on CUDA."""
     if not features:
         return pd.DataFrame()
     import torch
 
-    device = torch.device(config.cuda_device if config.use_cuda and torch.cuda.is_available() else "cpu")
-    eligible = frame.analysis_eligible.fillna(False).to_numpy(bool) if "analysis_eligible" in frame else np.ones(len(frame), bool)
-    x_np = frame[[item.name for item in features]].to_numpy(dtype=np.float64, copy=True)
-    finite_x = torch.as_tensor(np.isfinite(x_np) & eligible[:, None], device=device)
-    x_on = torch.as_tensor(np.nan_to_num(x_np, nan=0.0).astype(bool), device=device) & finite_x
-    session_np = frame.session_date.astype(str).to_numpy()
-    symbol_np = frame.symbol.astype(str).to_numpy()
-    decision_np = frame.decision_ts.astype(str).to_numpy()
-    year_np = pd.to_datetime(frame.session_date).dt.year.to_numpy()
-    intersection_np = pd.MultiIndex.from_arrays([session_np, symbol_np])
-    code_arrays = {
-        "sessions": pd.factorize(session_np, sort=False)[0],
-        "symbols": pd.factorize(symbol_np, sort=False)[0],
-        "decisions": pd.factorize(decision_np, sort=False)[0],
-        "years": pd.factorize(year_np, sort=False)[0],
-        "intersection": pd.factorize(intersection_np, sort=False)[0],
-    }
-    codes = {name: torch.as_tensor(value, device=device, dtype=torch.long) for name, value in code_arrays.items()}
+    owns_context = context is None
+    context = context or build_cuda_binary_context(frame, features, config)
+    if tuple(item.name for item in features) != context.feature_names:
+        raise ValueError("CUDA binary feature context does not match the active feature set")
+    device = context.device
+    finite_x = context.finite_x
+    x_on = context.x_on
+    codes = context.codes
 
     def grouped(
         valid: torch.Tensor,
@@ -260,7 +288,7 @@ def cuda_binary_scan_batch(
                 rows.append({**base, "status": "insufficient_data"}); continue
             effect = float(values["effect"][index]); standard_error = float(values["se"][index]); probability = float(np.clip(values["p"][index], 0.0, 1.0))
             rows.append({**base, "on_count": int(values["n_on"][index]), "off_count": int(values["n_off"][index]), "signal_on_count": int(values["n_on"][index]), "signal_off_count": int(values["n_off"][index]), "signal_on_sessions": int(values["on_sessions"][index]), "signal_off_sessions": int(values["off_sessions"][index]), "signal_on_symbols": int(values["on_symbols"][index]), "signal_off_symbols": int(values["off_symbols"][index]), "signal_on_decision_timestamps": int(values["on_decisions"][index]), "signal_off_decision_timestamps": int(values["off_decisions"][index]), "activation_rate": float(values["n_on"][index] / max(count, 1)), "on_mean_target": float(values["on_mean"][index]), "off_mean_target": float(values["off_mean"][index]), "mean_target": float(values["mean_y"][index]), "median_target": np.nan, "pearson": float(values["pearson"][index]), "spearman": np.nan, "slope": effect, "cluster_se": np.nan, "cluster_t": np.nan, "date_cluster_p": np.nan, "two_way_cluster_se": standard_error, "two_way_cluster_t": float(values["t"][index]), "two_way_cluster_p": probability, "raw_p": probability, "screen_inference": "two_way_date_symbol_cuda_exact_binary", "top_bottom_spread": effect, "monotonicity": np.nan, "shape": "binary_positive" if effect > 0 else "binary_negative", "effect_kind": "binary_on_minus_off", "effect_value": effect, "status": "binary_screened"})
-    if device.type == "cuda":
+    if owns_context and device.type == "cuda":
         torch.cuda.empty_cache()
     return pd.DataFrame(rows)
 

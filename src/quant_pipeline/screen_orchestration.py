@@ -10,6 +10,7 @@ import pandas as pd
 
 from .bulk_scan import (
     assert_valid_screen_results,
+    build_cuda_binary_context,
     build_cuda_feature_context,
     cuda_binary_scan_batch,
     cuda_screen,
@@ -100,6 +101,7 @@ def screen_feature_blocks_against_target_blocks(
         binary = [item for item in specs if item.dtype == "binary"]
         categorical = [item for item in specs if item.classification == "categorical" or item.dtype == "categorical"]
         context = build_cuda_feature_context(selected_features, continuous, config) if continuous else None
+        binary_context = build_cuda_binary_context(selected_features, binary, config) if binary and config.use_cuda else None
         for grouped_paths, grouped_specs in target_groups:
             for target_path in grouped_paths:assert_cache_key_alignment(feature_path, target_path)
             targets=[item for chunk in grouped_specs for item in chunk]
@@ -122,7 +124,15 @@ def screen_feature_blocks_against_target_blocks(
                 active = binary if scanner is binary_scan_batch else categorical
                 if not active:
                     continue
-                additions = cuda_binary_scan_batch(combined, active, names, config) if scanner is binary_scan_batch and config.use_cuda else scanner(combined, active, names, config)
+                completed = {(row.feature, row.target) for row in results.itertuples()}
+                active = [spec for spec in active if any((spec.name, name) not in completed for name in names)]
+                if not active:
+                    continue
+                if scanner is binary_scan_batch and config.use_cuda:
+                    active_binary_context = binary_context if tuple(spec.name for spec in active) == binary_context.feature_names else build_cuda_binary_context(selected_features, active, config)
+                    additions = cuda_binary_scan_batch(combined, active, names, config, active_binary_context)
+                else:
+                    additions = scanner(combined, active, names, config)
                 completed = {(row.feature, row.target) for row in results.itertuples()}
                 additions = additions.loc[
                     [((row.feature, row.target) not in completed) for row in additions.itertuples()]
