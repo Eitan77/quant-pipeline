@@ -24,6 +24,7 @@ from .registry import (
 from .screen_finalization import finalize_phase1_screen
 from .screen_orchestration import screen_feature_blocks_against_target_blocks
 from .bulk_scan import assert_valid_screen_results
+from .candidate_selection import select_exact_candidate_queue
 
 
 @dataclass(frozen=True)
@@ -69,8 +70,8 @@ def _atomic_json(payload:dict,path:Path)->None:
 def validate_phase1a_source(source_run: str | Path, config: ScanConfig) -> Phase1ASource:
     root=Path(source_run)
     manifest_path=root/"manifest.json"; fingerprint_path=root/"fingerprint.json"
-    progress_path=root/"progress.json"; results_path=root/"master_results.csv"; feature_registry_path=root/"feature_registry.csv"; target_registry_path=root/"target_registry.csv"
-    if not all(path.exists() for path in (manifest_path,fingerprint_path,progress_path,results_path,feature_registry_path,target_registry_path)):raise FileNotFoundError("Source Phase 1A is incomplete")
+    progress_path=root/"progress.json"; results_path=root/"master_results.csv"; feature_registry_path=root/"feature_registry.csv"; target_registry_path=root/"target_registry.csv"; coverage_path=root/"scan_coverage.csv"
+    if not all(path.exists() for path in (manifest_path,fingerprint_path,progress_path,results_path,feature_registry_path,target_registry_path,coverage_path)):raise FileNotFoundError("Source Phase 1A is incomplete")
     manifest=json.loads(manifest_path.read_text(encoding="utf-8")); fingerprint=json.loads(fingerprint_path.read_text(encoding="utf-8"))
     progress=json.loads(progress_path.read_text(encoding="utf-8"))
     if progress.get("stage")!="complete":raise ValueError("Source Phase 1A run is not complete")
@@ -92,9 +93,13 @@ def validate_phase1a_source(source_run: str | Path, config: ScanConfig) -> Phase
     if unknown_result_features:raise ValueError(f"Source results contain unknown features: {unknown_result_features}")
     if unknown_result_targets:raise ValueError(f"Source results contain unknown targets: {unknown_result_targets}")
     feature_index=_index(feature_paths,{item.name for item in features}); target_index=_index(target_paths,{item.name for item in targets})
-    missing_features=sorted({item.name for item in features if item.status=="requested"}-set(feature_index))
+    coverage=pd.read_csv(coverage_path)
+    feature_column="feature" if "feature" in coverage else "name" if "name" in coverage else None
+    if feature_column is None or "status" not in coverage:raise ValueError("Source scan_coverage.csv is missing feature/name or status")
+    built_features=set(coverage.loc[coverage.status.eq("built"),feature_column].dropna())
+    missing_features=sorted(built_features-set(feature_index))
     missing_targets=sorted({item.name for item in targets}-set(target_index))
-    if missing_features:raise FileNotFoundError(f"Source registry features missing from caches: {missing_features}")
+    if missing_features:raise FileNotFoundError(f"Features marked built but missing from the cache index: {missing_features}")
     if missing_targets:raise FileNotFoundError(f"Source registry targets missing from caches: {missing_targets}")
     anchor=target_paths[0]
     for path in [*feature_paths,*target_paths[1:]]:assert_cache_key_alignment(path,anchor)
@@ -135,16 +140,13 @@ def _run_dual_exact(
     chunks:list[list[FeatureSpec]],
     config:ScanConfig,
     root:Path,
+    candidate_queue:pd.DataFrame,
 ) -> pd.DataFrame:
     """Run authoritative CPU exact diagnostics for newly introduced features."""
     from .exact_parallel import exact_pair
     dual_path_by_name={spec.name:path for path,specs in zip(dual_paths,chunks) for spec in specs}
     specs={spec.name:spec for specs_chunk in chunks for spec in specs_chunk}
-    queue=combined.loc[
-        combined.discovery_phase.eq("1B")
-        & combined.target_tier.eq("primary")
-        & combined.primary_global_fdr.le(config.primary_fdr_threshold)
-    ].sort_values(["primary_global_fdr","feature","target"],kind="mergesort")
+    queue=candidate_queue.loc[candidate_queue.discovery_phase.eq("1B")]
     exact_root=root/"exact_journal"/"cpu";exact_root.mkdir(parents=True,exist_ok=True)
     rows=[];diagnostic_root=root/"candidate_diagnostics";diagnostic_root.mkdir(exist_ok=True)
     for queued in queue.itertuples(index=False):
@@ -198,29 +200,35 @@ def run_phase1b(source_run: str | Path, config: ScanConfig) -> Path:
     _atomic_json({"source_run":str(source.root),"fingerprint":source.fingerprint["sha256"],"manifest_sha256":source.source_manifest_hash,"master_results_sha256":source.source_results_hash,"tree_sha256":source.tree_hash},phase/"source_artifact_hashes.json")
     _atomic_json({"plan_hash":plan_hash(compiled),"features":[{"definition":item.definition,"spec":item.spec} for item in compiled]},phase/"compiled_feature_plan.json")
     dual_paths,chunks,coverage=build_dual_feature_chunks(compiled,source.feature_cache_index,config,root/config.dual_factor_cache_subdir,fingerprint["sha256"])
+    built_dual_feature_count=sum(len(chunk) for chunk in chunks)
+    if compiled and built_dual_feature_count==0:
+        raise RuntimeError("Phase 1B compiled features, but none passed construction and coverage requirements.")
     _atomic_csv(pd.DataFrame(coverage),phase/"dual_feature_coverage.csv"); _atomic_csv(registry_frame([item.spec for item in compiled]),phase/"dual_feature_registry.csv")
     write_registry_json([item.spec for item in compiled],phase/"dual_feature_registry.json")
     target_paths=sorted(set(source.target_cache_index.values()),key=str)
     target_chunks=[[item for item in source.target_registry if source.target_cache_index[item.name]==path] for path in target_paths]
     dual=screen_feature_blocks_against_target_blocks(feature_paths=dual_paths,feature_specs_by_path=chunks,target_paths=target_paths,target_specs_by_path=target_chunks,config=config,run_root=root)
-    if compiled and any(chunks) and dual.empty:
-        raise RuntimeError("Phase 1B built features but produced no broad-screen result rows")
+    phase1b_result_count=len(dual)
+    if built_dual_feature_count>0 and phase1b_result_count==0:
+        raise RuntimeError("Phase 1B features were built, but no valid feature-target scan results were produced.")
     _atomic_csv(dual.sort_values(["feature","target"],kind="mergesort"),phase/"dual_screen_results.csv")
     base=pd.read_csv(source.master_results_path); combined=merge_combined_results(base,dual,source.target_registry,combined_registry,config)
     _atomic_csv(combined,root/"master_results.csv")
     _atomic_csv(registry_frame(combined_registry),root/"feature_registry.csv");_atomic_csv(registry_frame(source.target_registry),root/"target_registry.csv")
     write_registry_json(combined_registry,root/"feature_registry.json");write_registry_json(source.target_registry,root/"target_registry.json")
     _atomic_csv(_parent_comparison(combined,compiled),phase/"dual_parent_comparison.csv")
-    detailed=_run_dual_exact(source,combined,dual_paths,chunks,config,root)
-    expected=set(map(tuple,combined.loc[combined.target_tier.eq("primary")&combined.primary_global_fdr.le(config.primary_fdr_threshold),["feature","target"]].to_numpy()))
+    feature_paths_for_queue={**source.feature_cache_index,**{spec.name:path for path,specs in zip(dual_paths,chunks) for spec in specs}}
+    candidate_queue=select_exact_candidate_queue(combined.loc[combined.target_tier.eq("primary")],config,feature_paths_for_queue,limit=250)
+    detailed=_run_dual_exact(source,combined,dual_paths,chunks,config,root,candidate_queue)
+    expected=set(map(tuple,candidate_queue[["feature","target"]].to_numpy()))
     observed=set(map(tuple,detailed[["feature","target"]].to_numpy())) if not detailed.empty else set()
-    promotion_ready=expected.issubset(observed)
+    promotion_ready=built_dual_feature_count>0 and phase1b_result_count>0 and expected.issubset(observed)
     if not promotion_ready and not detailed.empty:
         detailed.loc[detailed.status.isin(["robust_phase1_anomaly_candidate","requires_phase2_testing"]),"status"]="exact_diagnostics_incomplete"
         _atomic_csv(detailed,root/"detailed_candidates.csv")
     valid_two_way=int(pd.to_numeric(dual.get("two_way_cluster_p",pd.Series(dtype=float)),errors="coerce").notna().sum())
     limitations=[] if promotion_ready else ["One or more combined-FDR candidates lack reusable or newly computed exact diagnostics."]
-    status={"stage":"complete","run_type":"phase1b_derived","source_phase1a_run":str(source.root),"source_phase1a_fingerprint":source.fingerprint["sha256"],"source_manifest_hash":source.source_manifest_hash,"phase1b_fingerprint":fingerprint["sha256"],"discovery_end":config.discovery_end,"sealed_holdout_start":config.sealed_holdout_start,"holdout_access":False,"compiled_dual_features":len(compiled),"built_dual_features":sum(len(c) for c in chunks),"skipped_dual_features":int(sum(row.get("status")!="built" for row in coverage)),"dual_pairs_screened":len(dual),"empty_plan_reason":"manifest_compiled_zero_features" if not compiled else None,"pairs_passing_on_off_coverage":int(dual.raw_p.notna().sum()) if "raw_p" in dual else 0,"pairs_with_valid_two_way_inference":valid_two_way,"combined_primary_test_count":int(combined.get("primary_test_count",pd.Series([0])).max()),"combined_exploratory_test_count":int(combined.get("exploratory_test_count",pd.Series([0])).max()),"exact_candidate_count":len(detailed),"promotion_ready":promotion_ready,"evidence_stage":"exact_diagnostics_complete" if promotion_ready else "exact_diagnostics_incomplete","source_immutable":True,"phase1a_rebuilt":False,"combined_test_count":int(combined.raw_p.notna().sum()),"known_limitations":limitations}
+    status={"stage":"complete","run_type":"phase1b_derived","source_phase1a_run":str(source.root),"source_phase1a_fingerprint":source.fingerprint["sha256"],"source_manifest_hash":source.source_manifest_hash,"phase1b_fingerprint":fingerprint["sha256"],"discovery_end":config.discovery_end,"sealed_holdout_start":config.sealed_holdout_start,"holdout_access":False,"compiled_dual_features":len(compiled),"built_dual_features":built_dual_feature_count,"skipped_dual_features":int(sum(row.get("status")!="built" for row in coverage)),"dual_pairs_screened":phase1b_result_count,"empty_plan_reason":"manifest_compiled_zero_features" if not compiled else None,"pairs_passing_on_off_coverage":int(dual.raw_p.notna().sum()) if "raw_p" in dual else 0,"pairs_with_valid_two_way_inference":valid_two_way,"combined_primary_test_count":int(combined.get("primary_test_count",pd.Series([0])).max()),"combined_exploratory_test_count":int(combined.get("exploratory_test_count",pd.Series([0])).max()),"exact_candidate_count":len(detailed),"promotion_ready":promotion_ready,"evidence_stage":"exact_diagnostics_complete" if promotion_ready else "exact_diagnostics_incomplete","source_immutable":True,"phase1a_rebuilt":False,"combined_test_count":int(combined.raw_p.notna().sum()),"known_limitations":limitations}
     _atomic_json(status,root/"progress.json"); _atomic_json({**status,"config":config.as_dict(),"multiple_testing":"combined Phase 1A + Phase 1B broad-screen BH"},root/"manifest.json")
     if _tree_hash(source.root)!=source.tree_hash:raise RuntimeError("Phase 1A source changed during derived Phase 1B execution")
     readiness=[f"Phase 1B readiness: {'GO' if promotion_ready else 'NO-GO'}",f"Source Phase 1A run path: {source.root}",f"Source Phase 1A fingerprint: {source.fingerprint['sha256']}",f"Source manifest hash: {source.source_manifest_hash}",f"Derived Phase 1B fingerprint: {fingerprint['sha256']}",f"Discovery end: {config.discovery_end}",f"Sealed holdout start: {config.sealed_holdout_start}","Holdout access: false","Source immutable: true","Phase 1A rebuilt: false",f"Compiled dual features: {len(compiled)}",f"Built dual features: {sum(len(c) for c in chunks)}",f"Dual pairs screened: {len(dual)}",f"Pairs with valid two-way inference: {valid_two_way}",f"Combined primary test count: {status['combined_primary_test_count']}",f"Combined exploratory test count: {status['combined_exploratory_test_count']}",f"Exact candidates: {len(detailed)}",f"Known limitations: {limitations or 'none'}"]

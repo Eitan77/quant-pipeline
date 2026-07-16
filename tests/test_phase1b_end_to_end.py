@@ -17,6 +17,8 @@ from quant_pipeline.cache import (
 from quant_pipeline.config import ScanConfig
 from quant_pipeline.phase1b_run import run_phase1b, validate_phase1a_source
 from quant_pipeline.registry import FeatureSpec, TargetSpec, registry_frame
+from quant_pipeline.candidate_selection import select_exact_candidate_queue
+from quant_pipeline.run import _cluster_candidates
 
 
 def _tree_hash(root: Path) -> str:
@@ -79,10 +81,15 @@ def _source(tmp_path: Path, *, contaminate: bool = False) -> tuple[Path, Path, S
     target_specs = [TargetSpec("target_5m", "target", 5, "next open", "close", tier="primary")]
     registry_frame(feature_specs).to_csv(source / "feature_registry.csv", index=False)
     registry_frame(target_specs).to_csv(source / "target_registry.csv", index=False)
+    pd.DataFrame([{"feature":"parent_a","status":"built","reason":""},{"feature":"parent_b","status":"built","reason":""}]).to_csv(source/"scan_coverage.csv",index=False)
     pd.DataFrame([
         {"feature": "parent_a", "target": "target_5m", "raw_p": .04, "top_bottom_spread": .001, "monotonicity": .5, "status": "cuda_screened"},
         {"feature": "parent_b", "target": "target_5m", "raw_p": .08, "top_bottom_spread": .0005, "monotonicity": .3, "status": "cuda_screened"},
     ]).to_csv(source / "master_results.csv", index=False)
+    pd.DataFrame([
+        {"feature":"parent_a","target":"target_5m","raw_p":.04,"top_bottom_spread":.001,"status":"statistically_significant_discovery"},
+        {"feature":"parent_b","target":"target_5m","raw_p":.08,"top_bottom_spread":.0005,"status":"exploratory_relationship"},
+    ]).to_csv(source/"detailed_candidates.csv",index=False)
     (source / "manifest.json").write_text(json.dumps({
         "discovery_end": "2026-04-30", "sealed_holdout_start": "2026-05-01",
         "allow_holdout_access": False,
@@ -201,3 +208,46 @@ def test_phase1b_cli_calls_execution_path(tmp_path, monkeypatch, capsys):
     phase1b_launcher.main()
     assert called["source"] == str(tmp_path / "source")
     assert str(produced) in capsys.readouterr().out
+
+
+def test_requested_but_skipped_source_feature_is_accepted_unless_required_parent(tmp_path):
+    source,manifest,config=_source(tmp_path)
+    registry=pd.read_csv(source/"feature_registry.csv")
+    registry=pd.concat([registry,registry.iloc[[0]].assign(name="opening_return_1m")],ignore_index=True)
+    registry.to_csv(source/"feature_registry.csv",index=False)
+    coverage=pd.read_csv(source/"scan_coverage.csv")
+    pd.concat([coverage,pd.DataFrame([{"feature":"opening_return_1m","status":"skipped","reason":"source bars are 5m"}])],ignore_index=True).to_csv(source/"scan_coverage.csv",index=False)
+    validate_phase1a_source(source,config)
+    manifest.write_text("""schema_version: phase1b_manifest_v1
+definitions:
+  - id: missing_parent
+    feature_a: opening_return_1m
+    feature_b: parent_a
+    operator: intersection
+    condition_a: {transform: raw, comparator: gt, threshold: 0}
+    condition_b: {transform: raw, comparator: eq, threshold: 1}
+    output_dtype: binary
+""",encoding="utf-8")
+    with pytest.raises(FileNotFoundError,match="required dual parents"):
+        run_phase1b(source,config)
+
+
+def test_nonempty_plan_with_all_dual_features_failing_coverage_errors(tmp_path):
+    source,_,config=_source(tmp_path)
+    config=replace(config,dual_factor_min_signal_observations=10_000)
+    with pytest.raises(RuntimeError,match="none passed construction and coverage"):
+        run_phase1b(source,config)
+
+
+def test_standalone_and_normal_exact_candidate_queues_match():
+    results=pd.DataFrame({
+        "feature":["a_5","a_10","b_5"],"target":["fwd_return_5m"]*3,
+        "raw_p":[.001,.01,.20],"primary_global_fdr":[.003,.015,.20],
+        "anomaly_score":[.9,.8,.4],"feature_family":["a","a","b"],
+        "redundancy_group":["a_LOOKBACK","a_LOOKBACK","b_LOOKBACK"],
+        "monotonicity":[.8,.7,-.4],"spearman":[.1,.1,-.1],
+    })
+    config=ScanConfig(max_candidates_per_cluster=2)
+    normal=set(map(tuple,_cluster_candidates(results,None,config,250)[["feature","target"]].to_numpy()))
+    standalone=set(map(tuple,select_exact_candidate_queue(results,config,None,250)[["feature","target"]].to_numpy()))
+    assert normal==standalone
