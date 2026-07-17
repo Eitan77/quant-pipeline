@@ -164,9 +164,10 @@ def _run_dual_exact(
         if journal.exists():
             payload=pd.read_pickle(journal)
             if tuple(payload.get("key",()))!=key:raise RuntimeError(f"Exact journal key mismatch: {journal}")
-        else:
+        else:payload={}
+        if not payload or (specs[queued.feature].dtype=="binary" and payload.get("diagnostics_version",1)<2):
             row,table,diagnostics=exact_pair(dual_path_by_name[queued.feature],source.target_cache_index[queued.target],specs[queued.feature],queued.target,config,float(getattr(queued,"spearman",0) or 0),None)
-            payload={"key":key,"row":row,"table":table,"diagnostics":diagnostics};temporary=journal.with_suffix(".pkl.tmp");pd.to_pickle(payload,temporary);temporary.replace(journal)
+            payload={"key":key,"row":row,"table":table,"diagnostics":diagnostics,"diagnostics_version":2};temporary=journal.with_suffix(".pkl.tmp");pd.to_pickle(payload,temporary);temporary.replace(journal)
         row=payload.get("row")
         if row is None:continue
         row=dict(row);row.update({"feature":queued.feature,"target":queued.target,"screen_bh_fdr_p_global":queued.primary_global_fdr,"primary_global_fdr":queued.primary_global_fdr,"family_fdr":getattr(queued,"family_fdr",float("nan")),"cluster_fdr":getattr(queued,"cluster_fdr",float("nan")),"candidate_cluster":queued.candidate_cluster,"target_tier":getattr(queued,"target_tier","primary"),"discovery_phase":queued.discovery_phase,"evidence_class":getattr(queued,"evidence_class",None),"systematic_global_fdr":getattr(queued,"systematic_global_fdr",float("nan")),"promotion_inference":"exact_cpu_two_way_date_symbol"});rows.append(row)
@@ -271,6 +272,9 @@ def run_phase1b(source_run: str | Path, config: ScanConfig) -> Path:
         detailed=detailed.merge(parent_comparison[["dual_feature","target","best_parent_absolute_effect"]].rename(columns={"dual_feature":"feature"}),on=["feature","target"],how="left")
         mask=detailed.discovery_phase.eq("1B_systematic")
         detailed.loc[mask,"status"]=detailed.loc[mask].apply(lambda row:classify_systematic_candidate(row,config),axis=1)
+        from .diagnostics import phase2_recommendation
+        recommendations=pd.DataFrame([phase2_recommendation(row) for _,row in detailed.loc[mask].iterrows()],index=detailed.index[mask])
+        for column in recommendations:detailed.loc[mask,column]=recommendations[column]
         _atomic_csv(detailed,root/"detailed_candidates.csv");_atomic_csv(detailed.loc[mask],systematic_root/"promoted_candidates.csv")
     elif systematic is not None:
         _atomic_csv(pd.DataFrame(columns=["feature","target","status"]),systematic_root/"promoted_candidates.csv")

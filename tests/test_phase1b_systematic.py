@@ -5,6 +5,10 @@ import pandas as pd
 import pytest
 
 from quant_pipeline.config import ScanConfig
+from quant_pipeline.exact_parallel import (
+    _binary_exact_time_diagnostics, _binary_historical_subperiod_diagnostics,
+    _binary_recent_period_diagnostics, _binary_symbol_and_concentration_diagnostics,
+)
 from quant_pipeline.registry import FeatureSpec
 from quant_pipeline.systematic_dual_registry import (
     classify_systematic_candidate, compile_systematic_dual_plan,
@@ -94,3 +98,25 @@ def _candidate(**changes):
 ])
 def test_systematic_promotion_boundaries(changes,expected):
     assert classify_systematic_candidate(_candidate(**changes),ScanConfig())==expected
+
+
+def test_binary_candidates_receive_robustness_and_time_diagnostics():
+    sessions=pd.date_range("2022-01-03","2026-04-30",freq="7D")
+    rows=[]
+    for i,date in enumerate(sessions):
+        for symbol_index,symbol in enumerate(("A","B","C","D","E","F","G","H")):
+            for minute in (35,65):
+                signal=(i+symbol_index+(minute==65))%2
+                rows.append({"symbol":symbol,"session_date":date,"decision_ts":pd.Timestamp(date.date(),tz="UTC")+pd.Timedelta(hours=14,minutes=minute),"signal":signal,"target":.001*signal+.00001*symbol_index})
+    frame=pd.DataFrame(rows);config=replace(ScanConfig(),exact_time_min_observations=20,exact_time_min_sessions=10,exact_time_min_symbols=2)
+    historical=_binary_historical_subperiod_diagnostics(frame,"signal","target",1)
+    recent,recent_table=_binary_recent_period_diagnostics(frame,"signal","target",1,config)
+    symbol,tables=_binary_symbol_and_concentration_diagnostics(frame,"signal","target",1,config)
+    exact,exact_table=_binary_exact_time_diagnostics(frame,"signal","target",1,config)
+    assert historical["historical_subperiod_positive_fold_pct"]==1
+    assert recent["recent_to_full_effect_ratio"]==pytest.approx(1)
+    assert not recent_table.empty and symbol["eligible_symbols_expected_direction_pct"]==1
+    assert symbol["effect_remove_top5_symbols"]==pytest.approx(.001)
+    assert set(tables)=={"symbol","time_of_day"}
+    assert exact["time_concentration_label"] in {"persistent_through_session","insufficient_time_evidence"}
+    assert exact_table.minimum_sample_status.eq("sufficient").all()
