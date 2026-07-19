@@ -1,0 +1,11 @@
+Phase 1B readiness: GO
+Mode: systematic_only
+Discovery end: 2026-04-30
+Sealed holdout start: 2026-05-01
+Holdout access: false
+Source immutable: true
+Compiled dual features: 15000
+Built dual features: 13873
+Valid broad-screen tests: 239639
+Exact candidates: 105
+Known limitations: none
