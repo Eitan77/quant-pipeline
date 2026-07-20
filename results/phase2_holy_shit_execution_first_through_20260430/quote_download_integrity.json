@@ -1,0 +1,11 @@
+{
+  "daily_files": 251,
+  "quote_rows": 10360253,
+  "corrupt_files": 0,
+  "timestamps_outside_window": 0,
+  "requested_windows": 56521,
+  "windows_with_at_least_one_quote": 55595,
+  "empty_or_no_quote_windows": 926,
+  "max_endpoint": "2026-04-30 19:15:00+00:00",
+  "holdout_access": false
+}

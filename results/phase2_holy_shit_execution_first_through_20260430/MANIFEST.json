@@ -1,0 +1,16 @@
+{
+  "run_id": "phase2_holy_shit_execution_first_through_20260430",
+  "discovery_end": "2026-04-30",
+  "sealed_holdout_start": "2026-05-01",
+  "holdout_access": false,
+  "holdout_guard_passed": true,
+  "mechanisms": 10,
+  "execution_variants": 68,
+  "strict_initial_gate_passes": 0,
+  "descriptive_execution_qualified_mechanisms": 2,
+  "holy_shit_candidates": 0,
+  "gate_prospective": false,
+  "quote_root": "D:\\AlgoResearch\\research_pipeline\\terra_reports\\phase2_holy_shit_exact_quote_1y_v2",
+  "max_abs_daily_correlation": 0.738902887563101,
+  "max_trade_jaccard": 0.45159420289855073
+}

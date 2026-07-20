@@ -1,0 +1,16 @@
+candidate_id,mechanism_id,feature,schedule,quantile,threshold,train_rows
+S03_opening_continuation_q95,S03_opening_continuation,opening_15m,late,0.95,0.0203276108950376,75715
+S03_opening_continuation_q99,S03_opening_continuation,opening_15m,late,0.99,0.03230482339859,75715
+S04_extreme_momentum_q95,S04_extreme_momentum,move_15m,early,0.95,0.0099760599434375,60630
+S04_extreme_momentum_q99,S04_extreme_momentum,move_15m,early,0.99,0.016997455433011,60630
+S05_volume_confirmed_q95,S05_volume_confirmed,volume_move_15m,early,0.95,0.0103151549119502,60630
+S05_volume_confirmed_q99,S05_volume_confirmed,volume_move_15m,early,0.99,0.018276569135487,60630
+S06_vwap_displacement_q99,S06_vwap_displacement,vwap_distance,continuous15,0.99,0.0035078138076585,88240
+S07_market_residual_q95,S07_market_residual,residual_15m,early,0.95,0.0092726677190512,60630
+S07_market_residual_q99,S07_market_residual,residual_15m,early,0.99,0.0155508644413202,60630
+S08_breadth_reversal_q95,S08_breadth_reversal,market_lag,early,0.95,0.0125728496816009,48504
+S08_breadth_reversal_q99,S08_breadth_reversal,market_lag,early,0.99,0.020904701501131,48504
+S09_gap_reaction_q95,S09_gap_reaction,gap_reaction,early,0.95,0.028527095913887,64656
+S09_gap_reaction_q99,S09_gap_reaction,gap_reaction,early,0.99,0.0472697280347347,64656
+S10_bar_structure_q95,S10_bar_structure,bar_close_quality,early,0.95,0.0069101176457479,60630
+S10_bar_structure_q99,S10_bar_structure,bar_close_quality,early,0.99,0.0125602949690073,60630

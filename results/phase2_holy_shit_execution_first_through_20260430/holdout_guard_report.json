@@ -1,0 +1,6 @@
+{
+  "discovery_cutoff": "2026-04-30",
+  "sealed_holdout_start": "2026-05-01",
+  "max_source_session": "2026-04-30",
+  "passed": true
+}

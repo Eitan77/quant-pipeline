@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "provider": "alpaca",
+  "feed": "sip",
+  "lake_root": "D:\\AlgoResearch\\data\\raw\\alpaca\\market\\stocks\\quotes_sip\\schema_v1",
+  "logical_quote_table": "sip_quotes",
+  "logical_coverage_table": "sip_quote_coverage",
+  "quote_rows": 140904005,
+  "sessions": 251,
+  "symbols": 106,
+  "first_quote_ts": "2025-05-01 06:35:00.286556-07:00",
+  "last_quote_ts": "2026-04-30 13:00:10.159089-07:00",
+  "windows": 924429,
+  "coverage_sessions": 251,
+  "coverage_symbols": 106,
+  "source_run": "phase2_holy_shit_exact_quote_1y_v2",
+  "source_run_path": "D:\\AlgoResearch\\research_pipeline\\terra_reports\\phase2_holy_shit_exact_quote_1y_v2",
+  "published_sessions_this_call": 251,
+  "input_rows_this_call": 10360253,
+  "new_unique_quote_rows_this_call": 2020232,
+  "published_at_utc": "2026-07-20T02:52:04+00:00"
+}
