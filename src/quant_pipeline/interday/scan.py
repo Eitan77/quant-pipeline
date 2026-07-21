@@ -1,11 +1,22 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
 from .inference import newey_west_mean_inference
 from .registry import feature_definition_hash, target_definition_hash
 from .models import BlockPlan
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 @dataclass
 class DailyPairSeries:
@@ -38,16 +49,94 @@ TEST_SERIES={"rank_ic":"rank_ic","top_minus_bottom_decile":"top_minus_bottom","t
 def summarize_pair(daily,*,feature_spec,target_spec,distinct_symbols):
     rows=[]; lag=max(int(target_spec.overlap_sessions),5)
     for test,field in TEST_SERIES.items():
-        inf=newey_west_mean_inference(getattr(daily,field),lag=lag); rows.append({"feature":feature_spec.name,"feature_family":feature_spec.family,"feature_redundancy_group":feature_spec.redundancy_group,"target":target_spec.name,"canonical_target_id":target_spec.canonical_target_id,"target_family":target_spec.target_family,"fdr_family":target_spec.fdr_family,"horizon_sessions":target_spec.horizon_sessions,"future_day":target_spec.future_day,"checkpoint":target_spec.checkpoint,"return_basis":target_spec.return_basis,"is_executable":target_spec.is_executable,"diagnostic_only":target_spec.diagnostic_only,"test_type":test,"effect":inf.mean,"effect_bps":inf.mean*10000 if test!="rank_ic" else np.nan,"hac_standard_error":inf.hac_standard_error,"hac_t":inf.hac_t,"raw_p":inf.pvalue,"valid_dates":inf.n,"distinct_symbols":distinct_symbols,"mean_ic_cross_section_size":float(np.nanmean(daily.ic_cross_section_size)) if daily.ic_cross_section_size is not None else np.nan,"minimum_ic_cross_section_size":np.nan,"mean_top_coverage":float(np.nanmean(daily.top_coverage)) if daily.top_coverage is not None else np.nan,"mean_bottom_coverage":float(np.nanmean(daily.bottom_coverage)) if daily.bottom_coverage is not None else np.nan,"mean_middle_coverage":float(np.nanmean(daily.middle_coverage)) if daily.middle_coverage is not None else np.nan,"mean_quintile_top_coverage":float(np.nanmean(daily.quintile_top_coverage)) if daily.quintile_top_coverage is not None else np.nan,"mean_quintile_bottom_coverage":float(np.nanmean(daily.quintile_bottom_coverage)) if daily.quintile_bottom_coverage is not None else np.nan,"positive_date_fraction":inf.positive_fraction,"quintile_spread_bps":float(np.nanmean(daily.quintile_spread)*10000),"feature_definition_hash":feature_definition_hash(feature_spec),"target_definition_hash":target_definition_hash(target_spec),"backend":"cpu_numba_reference"})
+        inf=newey_west_mean_inference(getattr(daily,field),lag=lag); rows.append({"feature":feature_spec.name,"feature_family":feature_spec.family,"feature_redundancy_group":feature_spec.redundancy_group,"target":target_spec.name,"canonical_target_id":target_spec.canonical_target_id,"target_family":target_spec.target_family,"fdr_family":target_spec.fdr_family,"horizon_sessions":target_spec.horizon_sessions,"future_day":target_spec.future_day,"checkpoint":target_spec.checkpoint,"endpoint_order":target_spec.endpoint_order,"return_basis":target_spec.return_basis,"is_executable":target_spec.is_executable,"diagnostic_only":target_spec.diagnostic_only,"test_type":test,"effect":inf.mean,"effect_bps":inf.mean*10000 if test!="rank_ic" else np.nan,"hac_standard_error":inf.hac_standard_error,"hac_t":inf.hac_t,"raw_p":inf.pvalue,"valid_dates":inf.n,"distinct_symbols":distinct_symbols,"mean_ic_cross_section_size":float(np.nanmean(daily.ic_cross_section_size)) if daily.ic_cross_section_size is not None else np.nan,"minimum_ic_cross_section_size":np.nan,"mean_top_coverage":float(np.nanmean(daily.top_coverage)) if daily.top_coverage is not None else np.nan,"mean_bottom_coverage":float(np.nanmean(daily.bottom_coverage)) if daily.bottom_coverage is not None else np.nan,"mean_middle_coverage":float(np.nanmean(daily.middle_coverage)) if daily.middle_coverage is not None else np.nan,"mean_quintile_top_coverage":float(np.nanmean(daily.quintile_top_coverage)) if daily.quintile_top_coverage is not None else np.nan,"mean_quintile_bottom_coverage":float(np.nanmean(daily.quintile_bottom_coverage)) if daily.quintile_bottom_coverage is not None else np.nan,"positive_date_fraction":inf.positive_fraction,"quintile_spread_bps":float(np.nanmean(daily.quintile_spread)*10000),"feature_definition_hash":feature_definition_hash(feature_spec),"target_definition_hash":target_definition_hash(target_spec),"backend":"cpu_python_reference"})
+    for row in rows:
+        row["backend"] = "cpu_python_reference"
     return rows
+
+
+def pair_distinct_symbol_count(
+    feature_rank: np.ndarray,
+    target: np.ndarray,
+) -> int:
+    """Count securities contributing at least one valid pair observation."""
+    paired = np.isfinite(feature_rank) & np.isfinite(target)
+    return int(np.any(paired, axis=0).sum())
 
 def scan_feature_target_block_cpu(*,feature_ids,target_ids,rank_cache,target_values,feature_specs,target_specs,config,retain_daily=False):
     rows=[]; store={}
     for fi in feature_ids:
         for ti in target_ids:
-            daily=calculate_daily_pair_series(rank_cache.percentile_ranks[fi],rank_cache.deciles[fi],rank_cache.quintiles[fi],target_values[ti],minimum_ic_symbols=config.minimum_rank_ic_cross_section_size,minimum_valid_extreme=config.minimum_valid_outcomes_per_extreme_decile,minimum_bin_coverage=config.minimum_target_coverage_fraction_per_bin,minimum_middle_coverage=config.minimum_middle_target_coverage_fraction,minimum_quintile_extreme=config.minimum_valid_outcomes_per_extreme_quintile); rows.extend(summarize_pair(daily,feature_spec=feature_specs[fi],target_spec=target_specs[ti],distinct_symbols=int(np.isfinite(rank_cache.percentile_ranks[fi]).any(axis=0).sum())));
+            daily=calculate_daily_pair_series(rank_cache.percentile_ranks[fi],rank_cache.deciles[fi],rank_cache.quintiles[fi],target_values[ti],minimum_ic_symbols=config.minimum_rank_ic_cross_section_size,minimum_valid_extreme=config.minimum_valid_outcomes_per_extreme_decile,minimum_bin_coverage=config.minimum_target_coverage_fraction_per_bin,minimum_middle_coverage=config.minimum_middle_target_coverage_fraction,minimum_quintile_extreme=config.minimum_valid_outcomes_per_extreme_quintile); rows.extend(summarize_pair(daily,feature_spec=feature_specs[fi],target_spec=target_specs[ti],distinct_symbols=pair_distinct_symbol_count(rank_cache.percentile_ranks[fi],target_values[ti])));
             if retain_daily: store[(fi,ti)]=daily
     return rows,store
+
+
+def scan_part_path(root: Path, *, feature_start: int, feature_stop: int, target_start: int, target_stop: int) -> Path:
+    return root / "scan_parts" / f"f{feature_start:04d}_f{feature_stop - 1:04d}_t{target_start:04d}_t{target_stop - 1:04d}.parquet"
+
+
+def scan_part_manifest_path(path: Path) -> Path:
+    return path.with_suffix(".json")
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    temporary.replace(path)
+
+
+def write_scan_part(*, path: Path, frame: pd.DataFrame, fingerprint: str, schema_version: str, feature_start: int, feature_stop: int, target_start: int, target_stop: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".parquet.tmp")
+    frame.to_parquet(temporary, index=False)
+    temporary.replace(path)
+    write_json_atomic(scan_part_manifest_path(path), {
+        "fingerprint": fingerprint,
+        "schema_version": schema_version,
+        "feature_start": feature_start,
+        "feature_stop": feature_stop,
+        "target_start": target_start,
+        "target_stop": target_stop,
+        "row_count": int(len(frame)),
+        "file_size": int(path.stat().st_size),
+        "file_sha256": file_sha256(path),
+    })
+
+
+def validate_scan_part(*, path: Path, fingerprint: str, schema_version: str, feature_start: int, feature_stop: int, target_start: int, target_stop: int) -> bool:
+    manifest_path = scan_part_manifest_path(path)
+    if not path.exists() or not manifest_path.exists():
+        return False
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = {"fingerprint": fingerprint, "schema_version": schema_version, "feature_start": feature_start, "feature_stop": feature_stop, "target_start": target_start, "target_stop": target_stop}
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        return False
+    if manifest.get("file_size") != path.stat().st_size or manifest.get("file_sha256") != file_sha256(path):
+        return False
+    frame = pd.read_parquet(path)
+    return manifest.get("row_count") == len(frame)
+
+
+def run_or_resume_scan_blocks(*, root: Path, rank_cache, target_values: np.ndarray, feature_specs, target_specs, config, plan: BlockPlan, fingerprint: str) -> pd.DataFrame:
+    part_paths: list[Path] = []
+    for feature_start in range(0, len(feature_specs), plan.feature_block_size):
+        feature_stop = min(feature_start + plan.feature_block_size, len(feature_specs))
+        for target_start in range(0, len(target_specs), plan.target_block_size):
+            target_stop = min(target_start + plan.target_block_size, len(target_specs))
+            path = scan_part_path(root, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop)
+            part_paths.append(path)
+            if validate_scan_part(path=path, fingerprint=fingerprint, schema_version=config.scan_schema_version, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop):
+                continue
+            rows, _ = scan_feature_target_block(feature_slice=slice(feature_start, feature_stop), target_slice=slice(target_start, target_stop), rank_cache=rank_cache, target_values=target_values, feature_specs=feature_specs, target_specs=target_specs, config=config, retain_daily=False)
+            write_scan_part(path=path, frame=pd.DataFrame(rows), fingerprint=fingerprint, schema_version=config.scan_schema_version, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop)
+    frames = [pd.read_parquet(path) for path in part_paths]
+    result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    key = ["feature", "target", "test_type"]
+    if not result.empty and result.duplicated(key).any():
+        raise ValueError("Merged scan parts contain duplicate hypotheses")
+    return result
 
 def scan_feature_target_block_gpu(*,feature_ids,target_ids,rank_cache,target_values,feature_specs,target_specs,config,retain_daily=False):
     raise RuntimeError("CUDA backend is disabled until parity-tested reductions exist")

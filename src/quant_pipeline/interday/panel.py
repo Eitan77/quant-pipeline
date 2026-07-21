@@ -82,7 +82,7 @@ def attach_membership_and_eligibility(build: DailyPanelBuild, membership: pd.Dat
     daily["scan_eligible"] = daily.analysis_eligible
     daily["corporate_action_valid"] = True
     daily["available_at_ts"] = pd.to_datetime(daily.available_at_ts, utc=True)
-    checkpoint_columns = [c for c in ("open5", "open15", "09:40", "09:45", "10:00", "11:00", "12:00", "close15", "close5") if c in build.checkpoints]
+    checkpoint_columns = [c for c in CHECKPOINTS if c in build.checkpoints.columns]
     if checkpoint_columns:
         daily = daily.merge(
             build.checkpoints[["security_id", "session_date", *checkpoint_columns]],

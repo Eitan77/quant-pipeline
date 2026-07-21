@@ -16,8 +16,7 @@ def neighbor_retention(horizons,effects,peak_index):
     return max((np.sign(peak)*effects[i] for i in valid),default=np.nan)/abs(peak) if valid else np.nan
 
 def chronological_checkpoint_order(targets):
-    def key(spec): return (spec.future_day, -1 if spec.checkpoint=="open5" else 999 if spec.checkpoint=="close5" else int(spec.checkpoint.replace(":","")))
-    return sorted(targets,key=key)
+    return sorted(targets, key=lambda spec: (spec.future_day, spec.endpoint_order))
 
 def build_horizon_profiles(scan_results: pd.DataFrame) -> pd.DataFrame:
     if scan_results.empty:return pd.DataFrame()
@@ -32,7 +31,7 @@ def build_checkpoint_profiles(scan_results: pd.DataFrame) -> pd.DataFrame:
     if scan_results.empty:return pd.DataFrame()
     rows=[]
     for keys,g in scan_results.groupby(["feature","test_type","return_basis"],dropna=False):
-        order=g.copy(); order["checkpoint_order"]=[(int(x),-1 if c=="open5" else 999 if c=="close5" else int(c.replace(":",""))) for x,c in zip(order.future_day,order.checkpoint)]; order=order.sort_values("checkpoint_order"); e=order.effect.to_numpy(float); valid=np.isfinite(e)
+        order=g.copy(); order["checkpoint_order"]=order.get("endpoint_order", pd.Series(np.arange(len(order)), index=order.index)); order=order.sort_values(["future_day","checkpoint_order"],kind="stable"); e=order.effect.to_numpy(float); valid=np.isfinite(e)
         if not valid.any():continue
         p=int(np.nanargmax(np.abs(e))); neighbors=[i for i in (p-1,p+1) if 0<=i<len(e) and np.isfinite(e[i])]; sign=np.sign(e[p]); prev=sign*e[p-1]/abs(e[p]) if p>0 and np.isfinite(e[p-1]) else np.nan; nxt=sign*e[p+1]/abs(e[p]) if p+1<len(e) and np.isfinite(e[p+1]) else np.nan; best=np.nanmax([prev,nxt]) if np.isfinite([prev,nxt]).any() else np.nan; rows.append({"feature":keys[0],"test_type":keys[1],"return_basis":keys[2],"peak_endpoint":order.iloc[p].target,"peak_effect":e[p],"previous_endpoint_retention":prev,"next_endpoint_retention":nxt,"best_neighbor_retention":best,"same_sign_endpoint_fraction":float(np.mean(np.sign(e[valid])==sign)),"sign_changes":int(np.sum(np.diff(np.sign(e[valid]))!=0)),"isolated_spike":not bool(neighbors)})
     return pd.DataFrame(rows)

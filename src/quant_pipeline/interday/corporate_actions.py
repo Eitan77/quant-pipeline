@@ -43,6 +43,49 @@ class CorporateActionIndex:
     action_valid: np.ndarray      # [date, security]
 
 
+def slice_action_index(
+    action_index: CorporateActionIndex,
+    security_index: int,
+) -> CorporateActionIndex:
+    """
+    Return a one-security CorporateActionIndex.
+
+    The result preserves the two-dimensional [date, security] contract so it
+    can be passed to interval_total_return with benchmark prices shaped
+    [date, 1].
+    """
+    if security_index < 0 or security_index >= len(action_index.security_ids):
+        raise IndexError(
+            f"security_index {security_index} is outside "
+            f"0..{len(action_index.security_ids) - 1}"
+        )
+
+    column = slice(security_index, security_index + 1)
+
+    return CorporateActionIndex(
+        sessions=action_index.sessions,
+        security_ids=np.asarray(
+            [action_index.security_ids[security_index]],
+            dtype=action_index.security_ids.dtype,
+        ),
+        split_index=np.ascontiguousarray(
+            action_index.split_index[:, column]
+        ),
+        dividend_index=np.ascontiguousarray(
+            action_index.dividend_index[:, column]
+        ),
+        terminal_cash=np.ascontiguousarray(
+            action_index.terminal_cash[:, column]
+        ),
+        terminal_status=np.ascontiguousarray(
+            action_index.terminal_status[:, column]
+        ),
+        action_valid=np.ascontiguousarray(
+            action_index.action_valid[:, column]
+        ),
+    )
+
+
 def normalize_actions(
     actions: pd.DataFrame,
     *,
@@ -199,6 +242,36 @@ def interval_total_return(
         price_return [date, security]
         unresolved_terminal [date, security]
     """
+    if entry_price.ndim != 2 or exit_price.ndim != 2:
+        raise ValueError(
+            "entry_price and exit_price must be [date, security]"
+        )
+
+    if entry_price.shape != exit_price.shape:
+        raise ValueError(
+            "entry_price and exit_price shapes must match: "
+            f"{entry_price.shape} != {exit_price.shape}"
+        )
+
+    expected_security_count = entry_price.shape[1]
+
+    action_arrays = {
+        "split_index": action_index.split_index,
+        "dividend_index": action_index.dividend_index,
+        "terminal_cash": action_index.terminal_cash,
+        "terminal_status": action_index.terminal_status,
+        "action_valid": action_index.action_valid,
+    }
+
+    for name, array in action_arrays.items():
+        if array.ndim != 2:
+            raise ValueError(f"{name} must be two-dimensional")
+        if array.shape[1] != expected_security_count:
+            raise ValueError(
+                f"{name} has {array.shape[1]} securities but prices have "
+                f"{expected_security_count}"
+            )
+
     dates, securities = entry_price.shape
 
     total_return = np.full(

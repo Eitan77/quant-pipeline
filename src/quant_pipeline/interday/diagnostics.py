@@ -21,6 +21,40 @@ class CandidateDiagnosticBundle:
     context: pd.DataFrame
 
 
+def calculate_trade_path_metrics(*, path_timestamp: pd.Series, path_total_value: pd.Series, entry_total_value: float, terminal_total_value: float) -> dict:
+    if not np.isfinite(entry_total_value):
+        raise ValueError("entry_total_value must be finite")
+    if entry_total_value <= 0:
+        raise ValueError("entry_total_value must be positive")
+    values = pd.to_numeric(path_total_value, errors="coerce").to_numpy(dtype=float)
+    timestamps = pd.to_datetime(path_timestamp, utc=True).to_numpy()
+    valid = np.isfinite(values)
+    if not valid.any():
+        return {"mfe": np.nan, "mae": np.nan, "mfe_timestamp": pd.NaT, "mae_timestamp": pd.NaT, "terminal_return": np.nan, "giveback": np.nan}
+    returns = values[valid] / entry_total_value - 1.0
+    valid_timestamps = timestamps[valid]
+    mfe_index = int(np.argmax(returns))
+    mae_index = int(np.argmin(returns))
+    terminal_return = terminal_total_value / entry_total_value - 1.0
+    return {
+        "mfe": float(returns[mfe_index]),
+        "mae": float(returns[mae_index]),
+        "mfe_timestamp": pd.Timestamp(valid_timestamps[mfe_index]),
+        "mae_timestamp": pd.Timestamp(valid_timestamps[mae_index]),
+        "terminal_return": float(terminal_return),
+        "giveback": float(returns[mfe_index] - terminal_return),
+    }
+
+
+def diagnostics_complete(*, candidates: pd.DataFrame, bundle: CandidateDiagnosticBundle | None) -> bool:
+    if candidates.empty:
+        return bundle is None
+    if bundle is None:
+        return False
+    required = (bundle.summary, bundle.historical_folds, bundle.recent_windows, bundle.concentration, bundle.timing_path, bundle.execution_sensitivity, bundle.cost_headroom)
+    return all(isinstance(frame, pd.DataFrame) and not frame.empty for frame in required)
+
+
 def net_spread_after_cost(
     gross_spread: float,
     one_way_turnover: float,

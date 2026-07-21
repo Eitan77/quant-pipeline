@@ -70,6 +70,7 @@ class InterdayTargetSpec:
     diagnostic_only: bool
     overlap_sessions: int
     minimum_basket_members: int
+    endpoint_order: int = 0
     is_duplicate_reference: bool = False
     definition_version: str = "v2"
 

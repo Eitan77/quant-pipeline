@@ -45,6 +45,20 @@ def target_definition_hash(spec): return hashlib.sha256(json.dumps(asdict(spec),
 
 DAILY_CHECKPOINTS={1:("09:40","09:45","10:00","10:15","10:30","11:00","12:00","13:00","14:00","15:00","close5"),2:("open5","09:45","10:00","10:30","12:00","14:00","close5"),**{day:("open5","10:00","12:00","14:00","close5") for day in range(3,11)},12:("open5","12:00","close5"),14:("open5","12:00","close5"),18:("open5","12:00","close5"),20:("open5","12:00","close5")}
 
+CHECKPOINT_ORDER = {
+    "open5": 0, "09:40": 1, "09:45": 2, "10:00": 3,
+    "10:15": 4, "10:30": 5, "11:00": 6, "12:00": 7,
+    "13:00": 8, "14:00": 9, "15:00": 10, "close5": 11,
+}
+
+
+def endpoint_order(*, future_day: int, checkpoint: str, target_family: str) -> int:
+    if target_family == "diagnostic_next_gap":
+        return future_day * 100
+    if checkpoint not in CHECKPOINT_ORDER:
+        raise KeyError(f"Unknown executable checkpoint: {checkpoint}")
+    return future_day * 100 + CHECKPOINT_ORDER[checkpoint]
+
 def canonical_target_id(day,checkpoint,basis): return f"ret_entry_to_d{day:02d}_{checkpoint.replace(':','')}_{basis}"
 
 def build_target_registry(config: InterdayConfig) -> list[InterdayTargetSpec]:
@@ -54,7 +68,7 @@ def build_target_registry(config: InterdayConfig) -> list[InterdayTargetSpec]:
             for basis in bases:
                 name=canonical_target_id(day,cp,basis)
                 if name in seen: continue
-                seen.add(name); family="daily_terminal" if cp=="close5" else "time_of_day"; out.append(InterdayTargetSpec(name,name,f"Return from D+1 open5 to D+{day} {cp}",family,f"{family}",day,day,cp,"open5",cp,basis,"simple", "aligned_QQQ_interval",True,False,day,config.minimum_sector_members_ex_focal if basis=="sector" else 0))
+                seen.add(name); family="daily_terminal" if cp=="close5" else "time_of_day"; out.append(InterdayTargetSpec(name,name,f"Return from D+1 open5 to D+{day} {cp}",family,f"{family}",day,day,cp,"open5",cp,basis,"simple", "aligned_QQQ_interval",True,False,day,config.minimum_sector_members_ex_focal if basis=="sector" else 0,endpoint_order=endpoint_order(future_day=day,checkpoint=cp,target_family=family)))
     for basis in bases:
-        name=f"diagnostic_next_gap_{basis}"; out.append(InterdayTargetSpec(name,name,"D close5 to D+1 open5", "diagnostic_next_gap","time_of_day",1,1,"open5","decision_close5","open5",basis,"simple","aligned_QQQ_interval",False,True,1,config.minimum_sector_members_ex_focal if basis=="sector" else 0))
+        name=f"diagnostic_next_gap_{basis}"; out.append(InterdayTargetSpec(name,name,"D close5 to D+1 open5", "diagnostic_next_gap","time_of_day",1,1,"open5","decision_close5","open5",basis,"simple","aligned_QQQ_interval",False,True,1,config.minimum_sector_members_ex_focal if basis=="sector" else 0,endpoint_order=endpoint_order(future_day=1,checkpoint="open5",target_family="diagnostic_next_gap")))
     return out

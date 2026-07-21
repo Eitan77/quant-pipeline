@@ -4,6 +4,41 @@ import numpy as np
 from .horizon import build_horizon_profiles,build_checkpoint_profiles,add_local_neighbor_metrics
 from .inference import benjamini_hochberg
 
+FOLDS = (
+    ("2019_2020", "2019-06-21", "2021-01-01"),
+    ("2021_2022", "2021-01-01", "2023-01-01"),
+    ("2023_2024", "2023-01-01", "2025-01-01"),
+    ("2025_2026_apr", "2025-01-01", "2026-05-01"),
+)
+
+RECENT_WINDOWS = (
+    ("last_24_months", pd.DateOffset(months=24)),
+    ("last_12_months", pd.DateOffset(months=12)),
+)
+
+
+def target_safe_fold_mask(*, sessions, entry_date_ids, exit_date_ids, start: str, stop: str) -> np.ndarray:
+    start_ts = pd.Timestamp(start)
+    stop_ts = pd.Timestamp(stop)
+    decision = pd.DatetimeIndex(sessions)
+    mask = ((decision >= start_ts) & (decision < stop_ts) & (entry_date_ids >= 0) & (exit_date_ids >= 0))
+    valid = np.flatnonzero(mask)
+    if len(valid):
+        entry = decision[entry_date_ids[valid]]
+        exit_ = decision[exit_date_ids[valid]]
+        mask[valid] &= ((entry >= start_ts) & (entry < stop_ts) & (exit_ >= start_ts) & (exit_ < stop_ts))
+    return mask
+
+
+def expected_sign_retained(values: np.ndarray, *, expected_sign: float, minimum_observations: int) -> bool:
+    valid = values[np.isfinite(values)]
+    return len(valid) >= minimum_observations and np.sign(np.mean(valid)) == np.sign(expected_sign)
+
+
+def recent_window_mask(sessions, offset: pd.DateOffset, discovery_end: str) -> np.ndarray:
+    end = pd.Timestamp(discovery_end)
+    return (pd.DatetimeIndex(sessions) >= end - offset) & (pd.DatetimeIndex(sessions) <= end)
+
 def apply_interday_fdr(results: pd.DataFrame) -> pd.DataFrame:
     key=["feature","target","test_type"]
     if results.duplicated(key).any():
@@ -44,14 +79,11 @@ def _bh(x):
     if good.any():
         q=p[good]; order=np.argsort(q); adj=np.minimum.accumulate((q[order]*len(q)/np.arange(1,len(q)+1))[::-1])[::-1]; out[np.flatnonzero(good)[order]]=np.minimum(adj,1)
     return out
-
 def cluster_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
     if candidates.empty:return candidates.copy()
     out=candidates.copy()
     redundancy = out.get("feature_redundancy_group", out.get("redundancy_group", out["feature"]))
     basis = out["return_basis"].astype(str) if "return_basis" in out else pd.Series("raw", index=out.index)
-    out["candidate_cluster"] = redundancy.astype(str) + "|" + out["test_type"].astype(str) + "|" + basis
+    target_family = out.get("target_family", pd.Series("unknown", index=out.index))
+    out["candidate_cluster"] = redundancy.astype(str) + "|" + out["test_type"].astype(str) + "|" + basis + "|" + target_family.astype(str)
     return out
-
-def target_safe_fold_mask(decision_dates,entry_dates,exit_dates,fold_start,fold_end):
-    return (pd.to_datetime(decision_dates)>=pd.Timestamp(fold_start))&(pd.to_datetime(exit_dates)<pd.Timestamp(fold_end))&(pd.to_datetime(entry_dates)>=pd.Timestamp(fold_start))

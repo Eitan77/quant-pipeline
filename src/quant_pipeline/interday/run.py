@@ -11,18 +11,19 @@ from .cache import write_matrix
 from .calendar import TradingCalendar
 from .candidates import cluster_candidates, select_candidates
 from .config import InterdayConfig
-from .corporate_actions import build_corporate_action_index, normalize_actions
+from .corporate_actions import build_corporate_action_index, normalize_actions, slice_action_index
 from .features import build_context_matrix, build_feature_matrix, deduplicate_features
 from .fingerprint import enforce_interday_fingerprint, git_commit, interday_fingerprint
 from .panel import DailyPanelBuild, attach_membership_and_eligibility
 from .primitives import build_primitives, to_dense_panel
-from .ranking import build_rank_bin_cache
+from .ranking import build_rank_bin_cache, build_persistence_table
 from .registry import build_feature_registry, build_target_registry
 from .report import write_report
-from .scan import choose_block_plan, scan_feature_target_block
+from .scan import choose_block_plan, run_or_resume_scan_blocks
 from .source import SourceProvenance, load_compact_daily_inputs, schema_check, validate_identifier
-from .targets import build_targets
+from .targets import build_targets, write_target_artifacts
 from .telemetry import StageLedger, sampled_peak_memory, write_failure
+from .models import FeatureBuildResult, TargetBuildResult, InterdayFeatureSpec, InterdayTargetSpec
 
 
 def _write_df(root: Path, name: str, frame: pd.DataFrame) -> Path:
@@ -55,6 +56,44 @@ def _available_bytes(config: InterdayConfig) -> int:
         return int(psutil.virtual_memory().available)
     except ImportError:
         return 2 << 30
+
+
+STAGE_DEPENDENCIES = {
+    "source": (), "panel": ("source",), "features": ("panel",),
+    "targets": ("panel",), "ranks": ("features",),
+    "scan": ("ranks", "targets"), "finalize": ("scan",),
+    "diagnostics": ("finalize", "panel", "features", "targets", "ranks"),
+    "report": ("finalize", "diagnostics"),
+}
+
+
+def downstream_stages(stage: str) -> set[str]:
+    affected = {stage}
+    changed = True
+    while changed:
+        changed = False
+        for candidate, dependencies in STAGE_DEPENDENCIES.items():
+            if candidate not in affected and any(dep in affected for dep in dependencies):
+                affected.add(candidate)
+                changed = True
+    return affected
+
+
+def _stage_should_build(*, ledger: StageLedger, stage: str, fingerprint: str, forced_stages: set[str]) -> bool:
+    if stage in forced_stages:
+        return True
+    return not ledger.valid(stage, fingerprint)
+
+
+def _load_source_provenance(root: Path) -> SourceProvenance | None:
+    path = root / "source_provenance.json"
+    if not path.exists():
+        return None
+    return SourceProvenance(**json.loads(path.read_text(encoding="utf-8")))
+
+
+def _build_expected_fingerprint(*, config, feature_registry, target_registry, schema, provenance):
+    return interday_fingerprint(config, feature_registry, target_registry, git_commit_value=git_commit(), source_provenance={**provenance.__dict__, "schema": schema})
 
 
 def _load_membership(connection, config: InterdayConfig) -> pd.DataFrame:
@@ -111,27 +150,31 @@ def execute_interday_2a(config: InterdayConfig, *, stage: str = "all", force_reb
     ledger = StageLedger(root)
 
     try:
-        source_cached = all((root / name).exists() for name in ("source_daily_inputs.parquet", "source_checkpoint_inputs.parquet", "source_coverage.parquet", "source_provenance.json", "stage_source.json"))
-        if source_cached and not force_rebuild:
+        cached_provenance = _load_source_provenance(root)
+        source_artifacts_exist = all((root / name).exists() for name in ("source_daily_inputs.parquet", "source_checkpoint_inputs.parquet", "source_coverage.parquet", "source_provenance.json", "stage_source.json"))
+        source_must_rebuild = not source_artifacts_exist or cached_provenance is None or force_rebuild and (stage in {"all", "source"})
+        if source_must_rebuild:
+            with sampled_peak_memory() as memory:
+                daily, checkpoint_frame, coverage, provenance = load_compact_daily_inputs(config)
+        else:
+            provenance = cached_provenance
+        fp = _build_expected_fingerprint(config=config, feature_registry=features, target_registry=targets, schema=schema, provenance=provenance)
+        enforce_interday_fingerprint(root, fp, resume=config.resume)
+        fingerprint = fp["sha256"]
+        forced_stages = downstream_stages(stage if stage != "all" else "source") if force_rebuild else set()
+        if force_rebuild:
+            ledger.invalidate_stage_and_dependents(stage if stage != "all" else "source")
+        if source_must_rebuild or _stage_should_build(ledger=ledger, stage="source", fingerprint=fingerprint, forced_stages=forced_stages):
+            source_paths = [_write_df(root, "source_daily_inputs.parquet", daily), _write_df(root, "source_checkpoint_inputs.parquet", checkpoint_frame), _write_df(root, "source_coverage.parquet", coverage), _write_json(root, "source_provenance.json", provenance.__dict__)]
+            ledger.complete("source", fingerprint, source_paths)
+        else:
             daily = pd.read_parquet(root / "source_daily_inputs.parquet")
             checkpoint_frame = pd.read_parquet(root / "source_checkpoint_inputs.parquet")
             coverage = pd.read_parquet(root / "source_coverage.parquet")
-            provenance = SourceProvenance(**json.loads((root / "source_provenance.json").read_text(encoding="utf-8")))
-        else:
-            with sampled_peak_memory() as memory:
-                daily, checkpoint_frame, coverage, provenance = load_compact_daily_inputs(config)
-        fp = interday_fingerprint(config, features, targets, git_commit_value=git_commit(), source_provenance={**provenance.__dict__, "schema": schema})
-        enforce_interday_fingerprint(root, fp, resume=config.resume)
-        fingerprint = fp["sha256"]
-        if force_rebuild:
-            ledger.invalidate_from(stage if stage != "all" else "source")
-        if not ledger.valid("source", fingerprint):
-            source_paths = [_write_df(root, "source_daily_inputs.parquet", daily), _write_df(root, "source_checkpoint_inputs.parquet", checkpoint_frame), _write_df(root, "source_coverage.parquet", coverage), _write_json(root, "source_provenance.json", provenance.__dict__)]
-            ledger.complete("source", fingerprint, source_paths)
         if stage == "source": return root
 
         import duckdb
-        if ledger.valid("panel", fingerprint) and not force_rebuild:
+        if not _stage_should_build(ledger=ledger, stage="panel", fingerprint=fingerprint, forced_stages=forced_stages):
             panel=DailyPanelBuild(pd.read_parquet(root/"daily_panel.parquet"),pd.read_parquet(root/"checkpoint_panel.parquet"),pd.read_parquet(root/"panel_coverage.parquet"))
         else:
             membership_connection = duckdb.connect(config.catalog_path, read_only=True)
@@ -143,11 +186,11 @@ def execute_interday_2a(config: InterdayConfig, *, stage: str = "all", force_reb
         if stage == "panel": return root
 
         value_cols = [c for c in (
-            "open", "high", "low", "close", "volume", "dollar_volume", "first_60m_return",
-            "last_60m_return", "session_vwap", "open_30m_volume", "close_30m_volume",
-            "first_60m_volume", "last_60m_volume", "largest_5m_volume", "midday",
-            "open5", "open15", "09:40", "09:45", "10:00", "11:00", "12:00", "close15", "close5",
-        ) if c in panel.daily]
+            "open", "high", "low", "close", "volume", "dollar_volume", "session_vwap",
+            "first_60m_volume", "last_60m_volume", "largest_5m_volume", "open5", "open15",
+            "09:40", "09:45", "10:00", "10:15", "10:30", "11:00", "12:00", "13:00",
+            "14:00", "15:00", "close15", "close5", "sector_code", "industry_code",
+        ) if c in panel.daily.columns]
         dense = to_dense_panel(panel.daily, value_columns=value_cols)
         actions = pd.read_parquet(config.corporate_actions_path) if config.corporate_actions_path else pd.DataFrame()
         if "action_type" in actions:
@@ -155,35 +198,38 @@ def execute_interday_2a(config: InterdayConfig, *, stage: str = "all", force_reb
             actions["action_type"] = actions["action_type"].replace({"cash_dividends": "cash_dividend"})
         action_index = build_corporate_action_index(normalize_actions(actions, discovery_end=config.discovery_end), dense.sessions, dense.security_ids)
         primitives = build_primitives(dense, config.benchmark_symbol, action_index=action_index)
-        feature_result = deduplicate_features(build_feature_matrix(primitives, features, config))[0]
-        context_frame = build_context_matrix(primitives, features, config)
         feature_path = root / "feature_values.npy"
-        write_matrix(feature_path, feature_result.values, names=feature_result.names,
-                     dates=dense.sessions, security_ids=dense.security_ids,
-                     fingerprint=fingerprint, schema_version=config.feature_schema_version)
-        feature_paths = [feature_path, feature_path.with_suffix(".json"),
-                         _write_df(root, "feature_registry.parquet", pd.DataFrame([f.__dict__ for f in feature_result.specs])),
-                         _write_json(root, "feature_build_report.json", {"records": feature_result.build_records}),
-                         _write_df(root, "daily_context.parquet", context_frame)]
-        ledger.complete("features", fingerprint, feature_paths)
+        if not _stage_should_build(ledger=ledger, stage="features", fingerprint=fingerprint, forced_stages=forced_stages):
+            feature_frame = pd.read_parquet(root / "feature_registry.parquet")
+            feature_specs = [InterdayFeatureSpec(**row) for row in feature_frame.to_dict("records")]
+            feature_result = FeatureBuildResult(
+                names=[spec.name for spec in feature_specs],
+                values=np.load(feature_path, allow_pickle=False),
+                valid=np.isfinite(np.load(feature_path, allow_pickle=False)),
+                specs=feature_specs,
+                build_records=json.loads((root / "feature_build_report.json").read_text(encoding="utf-8")).get("records", []),
+            )
+            context_frame = pd.read_parquet(root / "daily_context.parquet") if (root / "daily_context.parquet").exists() else pd.DataFrame()
+        else:
+            feature_result = deduplicate_features(build_feature_matrix(primitives, features, config))[0]
+            context_frame = build_context_matrix(primitives, features, config)
+            write_matrix(feature_path, feature_result.values, names=feature_result.names, dates=dense.sessions, security_ids=dense.security_ids, fingerprint=fingerprint, schema_version=config.feature_schema_version)
+            feature_paths = [feature_path, feature_path.with_suffix(".json"), _write_df(root, "feature_registry.parquet", pd.DataFrame([f.__dict__ for f in feature_result.specs])), _write_json(root, "feature_build_report.json", {"records": feature_result.build_records}), _write_df(root, "daily_context.parquet", context_frame)]
+            ledger.complete("features", fingerprint, feature_paths)
         if stage == "features": return root
 
         cp_arrays = _checkpoint_arrays(panel, dense.sessions, dense.security_ids)
         benchmark_index = _resolve_benchmark_index(dense.security_ids, dense.symbols, config)
         benchmark_arrays = {k: v[:, benchmark_index]
                             for k, v in cp_arrays.items()}
+        benchmark_action_index = slice_action_index(action_index, benchmark_index)
         target_result = build_targets(checkpoint_arrays=cp_arrays, benchmark_checkpoint_arrays=benchmark_arrays,
                                       decision_eligible=dense.valid, sessions=dense.sessions,
-                                      action_index=action_index, benchmark_action_index=action_index,
-                                      target_registry=targets, config=config, sector_codes=None)
-        target_path = root / "target_values.npy"
-        write_matrix(target_path, target_result.total_returns, names=target_result.names,
-                     dates=dense.sessions, security_ids=dense.security_ids,
-                     fingerprint=fingerprint, schema_version=config.target_schema_version,
-                     axis_order=("target", "date", "security"))
-        target_paths = [target_path, target_path.with_suffix(".json"),
-                        _write_df(root, "target_registry.parquet", pd.DataFrame([t.__dict__ for t in target_result.specs])),
-                        _write_json(root, "target_build_report.json", {"records": target_result.build_records})]
+                                      action_index=action_index, benchmark_action_index=benchmark_action_index,
+                                      target_registry=targets, config=config, sector_codes=primitives.sector_codes)
+        target_path = root / "target_total_returns.npy"
+        target_paths = write_target_artifacts(root=root, target_result=target_result, sessions=dense.sessions, security_ids=dense.security_ids, fingerprint=fingerprint, config=config)
+        target_paths.extend([_write_df(root, "target_registry.parquet", pd.DataFrame([t.__dict__ for t in target_result.specs])), _write_json(root, "target_build_report.json", {"records": target_result.build_records})])
         if target_result.missing_reasons is not None:
             target_paths.append(_write_json(root, "target_missing_reason_codes.json", {x.name: int(x) for x in __import__('quant_pipeline.interday.targets', fromlist=['TargetMissingReason']).TargetMissingReason}))
         ledger.complete("targets", fingerprint, target_paths)
@@ -195,31 +241,20 @@ def execute_interday_2a(config: InterdayConfig, *, stage: str = "all", force_reb
                                      minimum_decile_size=config.minimum_decile_cross_section_size,
                                      minimum_quintile_size=config.minimum_quintile_cross_section_size)
         rank_paths = []
-        for name, values in (("feature_ranks.npy", ranks.percentile_ranks),
-                             ("feature_deciles.npy", ranks.deciles), ("feature_quintiles.npy", ranks.quintiles)):
+        for name, values in (("feature_ranks.npy", ranks.percentile_ranks), ("feature_deciles.npy", ranks.deciles), ("feature_quintiles.npy", ranks.quintiles)):
             path = root / name
-            write_matrix(path, values, names=feature_result.names, dates=dense.sessions,
-                         security_ids=dense.security_ids, fingerprint=fingerprint,
-                         schema_version=config.rank_schema_version)
+            write_matrix(path, values, names=feature_result.names, dates=dense.sessions, security_ids=dense.security_ids, fingerprint=fingerprint, schema_version=config.rank_schema_version)
             rank_paths.extend([path, path.with_suffix(".json")])
+        persistence_table = build_persistence_table(feature_values=feature_result.values, feature_names=feature_result.names, deciles=ranks.deciles, quintiles=ranks.quintiles, minimum_symbols=config.minimum_rank_ic_cross_section_size)
+        rank_paths.append(_write_df(root, "rank_persistence_turnover.parquet", persistence_table))
         ledger.complete("ranks", fingerprint, rank_paths)
         if stage == "ranks": return root
 
         plan = choose_block_plan(n_dates=len(dense.sessions), n_symbols=len(dense.security_ids),
                                  n_features=len(feature_result.names), n_targets=len(target_result.names),
                                  config=config, available_bytes=_available_bytes(config))
-        rows = []
         with sampled_peak_memory() as memory:
-            for f0 in range(0, len(feature_result.names), plan.feature_block_size):
-                for t0 in range(0, len(target_result.names), plan.target_block_size):
-                    pair, _ = scan_feature_target_block(
-                        feature_slice=slice(f0, min(f0 + plan.feature_block_size, len(feature_result.names))),
-                        target_slice=slice(t0, min(t0 + plan.target_block_size, len(target_result.names))),
-                        rank_cache=ranks, target_values=target_result.total_returns,
-                        feature_specs=feature_result.specs, target_specs=target_result.specs,
-                        config=config, retain_daily=False)
-                    rows.extend(pair)
-        scan = pd.DataFrame(rows)
+            scan = run_or_resume_scan_blocks(root=root, rank_cache=ranks, target_values=target_result.total_returns, feature_specs=feature_result.specs, target_specs=target_result.specs, config=config, plan=plan, fingerprint=fingerprint)
         scan_path = _write_df(root, "scan_results.parquet", scan)
         ledger.complete("scan", fingerprint, [scan_path])
         if stage == "scan": return root
@@ -237,20 +272,19 @@ def execute_interday_2a(config: InterdayConfig, *, stage: str = "all", force_reb
             ledger.complete("diagnostics", fingerprint, [diagnostics_path],
                             metadata={"explicit_no_candidates": True})
         else:
-            diagnostics_path = _write_json(root, "diagnostics.json", {
-                "status": "INCOMPLETE", "candidate_count": int(len(candidates)),
-                "reason": "Exact five-minute path replay, fold, concentration, and execution diagnostics required.",
-            })
+            diagnostics_path = _write_json(root, "diagnostics.json", {"status": "INCOMPLETE", "candidate_count": int(len(candidates)), "reason": "Exact five-minute path replay, fold, concentration, and execution diagnostics required."})
         if stage == "diagnostics": return root
 
-        readiness = "READY_FOR_SMOKE" if not candidates.empty else "READY_FOR_SMOKE"
+        readiness = "READY_FOR_SMOKE"
         metadata = {
             "experiment_id": config.experiment_id, "fingerprint": fingerprint,
             "git_commit": git_commit(), "discovery_end": config.discovery_end,
             "sealed_holdout_start": config.sealed_holdout_start,
             "source_rows": int(provenance.daily_rows), "features_built": len(feature_result.names),
             "targets_built": len(target_result.names), "scan_rows": len(scan),
-            "candidate_rows": len(candidates), "scan_backend": "cpu_numba_reference",
+            "planned_hypotheses": len(feature_result.names) * len(target_result.names) * 4,
+            "candidate_rows": len(candidates), "scan_backend": "cpu_python_reference",
+            "diagnostics_complete": ledger.valid("diagnostics", fingerprint),
             "peak_rss": memory["rss"], "peak_gpu_memory": memory.get("gpu", 0),
             "readiness": readiness, "full_run_permitted": False,
         }
@@ -265,13 +299,22 @@ def execute_interday_2a(config: InterdayConfig, *, stage: str = "all", force_reb
         _write_df(root, "target_coverage.csv", pd.DataFrame(target_result.build_records))
         _write_json(root, "scan_plan.json", {"feature_block_size": plan.feature_block_size, "target_block_size": plan.target_block_size, "estimated_peak_bytes": plan.estimated_peak_bytes, "device": plan.device})
         _write_df(root, "candidate_summary.csv", candidates)
-        _write_df(root, "candidate_daily_series.parquet", pd.DataFrame())
-        _write_df(root, "candidate_exact_diagnostics.parquet", pd.DataFrame())
+        if candidates.empty:
+            candidate_daily = pd.DataFrame(columns=["session_date", "feature", "target", "test_type", "daily_value", "target_coverage", "valid_cross_section_size"])
+            candidate_diagnostics = pd.DataFrame()
+        else:
+            candidate_daily = candidates[[c for c in ("feature", "target", "test_type", "effect", "mean_top_coverage", "mean_ic_cross_section_size") if c in candidates]].copy()
+            candidate_daily = candidate_daily.rename(columns={"effect": "daily_value", "mean_top_coverage": "target_coverage", "mean_ic_cross_section_size": "valid_cross_section_size"})
+            candidate_daily["session_date"] = pd.NaT
+            candidate_daily = candidate_daily[["session_date", "feature", "target", "test_type", "daily_value", "target_coverage", "valid_cross_section_size"]]
+            candidate_diagnostics = candidates.copy()
+        _write_df(root, "candidate_daily_series.parquet", candidate_daily)
+        _write_df(root, "candidate_exact_diagnostics.parquet", candidate_diagnostics)
         _write_json(root, "performance_metrics.json", {"scan": {"peak_rss": memory["rss"], "peak_gpu_memory": memory.get("gpu", 0), "backend": metadata["scan_backend"]}})
         _write_json(root, "run_journal.json", {"status": readiness, "stage": "report"})
-        write_report(root, scan=scan, candidates=candidates, metadata=metadata)
-        report_paths = [root / name for name in ("resolved_config.yaml", "fingerprint.json", "manifest.json", "readiness_report.json", "source_schema.json", "dependency_versions.json", "calendar_contract.json", "source_provenance.json", "panel_coverage.csv", "feature_coverage.csv", "target_coverage.csv", "feature_build_report.json", "target_build_report.json", "feature_registry.parquet", "target_registry.parquet", "scan_plan.json", "scan_results.csv", "candidates.csv", "candidate_summary.csv", "candidate_daily_series.parquet", "candidate_exact_diagnostics.parquet", "performance_metrics.json", "run_journal.json", "report.json", "report.md")]
         _write_json(root, "manifest.json", metadata)
+        write_report(root, scan=scan, candidates=candidates, rejected_candidates=pd.DataFrame(), horizon_profiles=pd.DataFrame(), checkpoint_profiles=pd.DataFrame(), feature_coverage=pd.DataFrame(feature_result.build_records), target_coverage=pd.DataFrame(target_result.build_records), persistence_turnover=persistence_table, diagnostics=None, metadata=metadata)
+        report_paths = [root / name for name in ("resolved_config.yaml", "fingerprint.json", "manifest.json", "readiness_report.json", "source_schema.json", "dependency_versions.json", "calendar_contract.json", "source_provenance.json", "panel_coverage.csv", "feature_coverage.csv", "target_coverage.csv", "feature_build_report.json", "target_build_report.json", "feature_registry.parquet", "target_registry.parquet", "rank_persistence_turnover.parquet", "scan_plan.json", "scan_results.parquet", "candidates.parquet", "candidate_summary.csv", "candidate_daily_series.parquet", "candidate_exact_diagnostics.parquet", "performance_metrics.json", "run_journal.json", "report.json", "report.md")]
         if ledger.valid("diagnostics", fingerprint):
             ledger.complete("report", fingerprint, report_paths)
         return root
