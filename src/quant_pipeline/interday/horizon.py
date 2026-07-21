@@ -2,6 +2,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+def add_local_neighbor_metrics(group: pd.DataFrame, order_columns: list[str]) -> pd.DataFrame:
+    ordered=group.sort_values(order_columns,kind="stable").copy(); effect=ordered["effect"].to_numpy(float); previous=np.full(len(ordered),np.nan); following=np.full(len(ordered),np.nan); previous[1:]=effect[:-1]; following[:-1]=effect[1:]; current_sign=np.sign(effect)
+    previous_retention=np.where(np.isfinite(previous)&np.isfinite(effect)&(effect!=0)&(np.sign(previous)==current_sign),np.abs(previous)/np.abs(effect),np.nan); following_retention=np.where(np.isfinite(following)&np.isfinite(effect)&(effect!=0)&(np.sign(following)==current_sign),np.abs(following)/np.abs(effect),np.nan)
+    ordered["previous_effect"]=previous; ordered["next_effect"]=following; ordered["previous_neighbor_retention"]=previous_retention; ordered["next_neighbor_retention"]=following_retention; ordered["best_neighbor_retention"]=np.nanmax(np.stack([previous_retention,following_retention],axis=0),axis=0); ordered["neighbor_supported"]=ordered["best_neighbor_retention"]>=0.50; return ordered
+
 def ordered_neighbor_indices(length,index): return ([index-1] if index>0 else [])+([index+1] if index+1<length else [])
 
 def neighbor_retention(horizons,effects,peak_index):

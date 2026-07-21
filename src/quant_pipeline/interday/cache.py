@@ -9,6 +9,12 @@ import pyarrow.parquet as pq
 INTERDAY_ROW_KEYS = ("security_id","session_date")
 class InterdayCacheMismatch(RuntimeError): pass
 
+def assert_sorted_unique_keys(frame: pd.DataFrame, row_keys: tuple[str, ...]) -> None:
+    keys=frame.loc[:,list(row_keys)].reset_index(drop=True)
+    if keys.duplicated(list(row_keys)).any(): raise ValueError(f"Duplicate keys: {row_keys}")
+    sorted_keys=keys.sort_values(list(row_keys),kind="stable").reset_index(drop=True)
+    if not keys.equals(sorted_keys): raise ValueError(f"Keys are not sorted by {row_keys}")
+
 def interday_row_key_hash(frame: pd.DataFrame, row_keys=INTERDAY_ROW_KEYS) -> str:
     keys=frame.loc[:,list(row_keys)].copy(); keys["session_date"]=pd.to_datetime(keys.session_date).astype(str)
     return hashlib.sha256(pd.util.hash_pandas_object(keys,index=False).to_numpy().tobytes()).hexdigest()
@@ -21,9 +27,7 @@ def _digest(path: Path) -> str:
 
 def write_interday_cache(path: Path, frame: pd.DataFrame, *, fingerprint: str, schema_version: str, sealed_holdout_start: str, row_keys=INTERDAY_ROW_KEYS, extra_metadata=None) -> dict:
     path.parent.mkdir(parents=True,exist_ok=True); keys=frame.loc[:,list(row_keys)]
-    if keys.duplicated(list(row_keys)).any(): raise ValueError(f"Duplicate interday cache keys: {path}")
-    sorted_frame=frame.sort_values(list(row_keys),kind="stable")
-    if not sorted_frame.index.equals(frame.index): raise ValueError(f"Interday cache keys must be sorted: {path}")
+    assert_sorted_unique_keys(frame,row_keys)
     if len(frame) and pd.to_datetime(frame.session_date).max() >= pd.Timestamp(sealed_holdout_start): raise ValueError("Cache reaches sealed holdout")
     tmp=path.with_suffix(path.suffix+".tmp"); frame.to_parquet(tmp,index=False); tmp.replace(path)
     metadata={"fingerprint":fingerprint,"schema_version":schema_version,"row_keys":list(row_keys),"row_count":len(frame),"row_key_hash":interday_row_key_hash(frame,row_keys),"file_size":path.stat().st_size,"file_sha256":_digest(path)}
@@ -44,7 +48,7 @@ def validate_interday_cache(path: Path, *, fingerprint: str, schema_version: str
 
 def write_matrix(path: Path, array: np.ndarray, *, names: list[str], dates: pd.DatetimeIndex,
                  security_ids: np.ndarray, fingerprint: str, schema_version: str,
-                 axis_order: tuple[str, ...] = ("feature", "date", "security")) -> dict:
+                 axis_order: tuple[str, ...] = ("feature", "date", "security"), source_start: str | None = None, analysis_start: str | None = None) -> dict:
     """Write a typed matrix and an integrity manifest atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
     actual = path if path.suffix == ".npy" else path.with_suffix(".npy")
@@ -52,12 +56,12 @@ def write_matrix(path: Path, array: np.ndarray, *, names: list[str], dates: pd.D
     with tmp.open("wb") as handle:
         np.save(handle, np.asarray(array), allow_pickle=False)
     tmp.replace(actual)
+    names_hash=hashlib.sha256("|".join(map(str,names)).encode()).hexdigest(); date_hash=hashlib.sha256(pd.util.hash_pandas_object(pd.Series(dates),index=False).to_numpy().tobytes()).hexdigest(); security_hash=hashlib.sha256("|".join(map(str,security_ids)).encode()).hexdigest()
     meta = {
         "schema_version": schema_version, "fingerprint": fingerprint,
         "shape": list(array.shape), "dtype": str(array.dtype),
         "axis_order": list(axis_order), "names": list(names),
-        "date_hash": hashlib.sha256(pd.util.hash_pandas_object(pd.Series(dates), index=False).to_numpy().tobytes()).hexdigest(),
-        "security_id_hash": hashlib.sha256("|".join(map(str, security_ids)).encode()).hexdigest(),
+        "names_hash": names_hash, "date_index_hash": date_hash, "security_index_hash": security_hash, "source_start": source_start, "analysis_start": analysis_start,
         "file_size": actual.stat().st_size, "file_sha256": _digest(actual),
     }
     manifest = actual.with_suffix(".json")
@@ -68,7 +72,10 @@ def write_matrix(path: Path, array: np.ndarray, *, names: list[str], dates: pd.D
 
 def validate_matrix(path: Path, *, fingerprint: str, schema_version: str,
                     shape: tuple[int, ...] | None = None,
-                    axis_order: tuple[str, ...] | None = None) -> dict:
+                    axis_order: tuple[str, ...] | None = None,
+                    dtype: str | None = None, names: list[str] | None = None,
+                    dates: pd.DatetimeIndex | None = None,
+                    security_ids: np.ndarray | None = None) -> dict:
     actual = path if path.suffix == ".npy" else path.with_suffix(".npy")
     manifest = actual.with_suffix(".json")
     if not actual.exists() or not manifest.exists():
@@ -82,4 +89,9 @@ def validate_matrix(path: Path, *, fingerprint: str, schema_version: str,
         raise InterdayCacheMismatch(f"Matrix shape mismatch: {actual}")
     if axis_order is not None and tuple(saved.get("axis_order", ())) != tuple(axis_order):
         raise InterdayCacheMismatch(f"Matrix axis-order mismatch: {actual}")
+    if dtype is not None and saved.get("dtype") != dtype: raise InterdayCacheMismatch(f"Matrix dtype mismatch: {actual}")
+    if names is not None and saved.get("names_hash") != hashlib.sha256("|".join(map(str,names)).encode()).hexdigest(): raise InterdayCacheMismatch(f"Matrix names mismatch: {actual}")
+    if dates is not None and saved.get("date_index_hash") != hashlib.sha256(pd.util.hash_pandas_object(pd.Series(dates),index=False).to_numpy().tobytes()).hexdigest(): raise InterdayCacheMismatch(f"Matrix dates mismatch: {actual}")
+    if security_ids is not None and saved.get("security_index_hash") != hashlib.sha256("|".join(map(str,security_ids)).encode()).hexdigest(): raise InterdayCacheMismatch(f"Matrix security IDs mismatch: {actual}")
+    np.load(actual,mmap_mode="r",allow_pickle=False)
     return saved

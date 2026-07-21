@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import asdict
-import hashlib,json,subprocess
+import hashlib,json,subprocess,importlib.metadata
 from pathlib import Path
 from .config import InterdayConfig
 from .models import InterdayFeatureSpec,InterdayTargetSpec
@@ -9,8 +9,23 @@ def git_commit() -> str:
     try: return subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
     except Exception: return "unknown"
 
+def _file_sha256(path: str | None) -> str | None:
+    if not path or not Path(path).exists():
+        return None
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
 def interday_fingerprint(config: InterdayConfig, features, targets, *, git_commit_value: str, source_provenance: dict) -> dict:
-    payload={"config":config.as_dict(),"features":[asdict(x) for x in features],"targets":[asdict(x) for x in targets],"git_commit":git_commit_value,"source_provenance":source_provenance}
+    dependencies = {}
+    for package in ("duckdb", "exchange-calendars", "numpy", "pandas", "pyarrow", "scipy", "torch"):
+        try:
+            dependencies[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            dependencies[package] = "uninstalled"
+    payload={"resolved_config":config.as_dict(),"feature_registry":[asdict(x) for x in features],"target_registry":[asdict(x) for x in targets],"git_commit":git_commit_value,"source_provenance":source_provenance,"stable_id_policy":{"security_id_column":config.security_id_column,"security_master_table":config.security_master_table,"require_stable_security_id":config.require_stable_security_id},"membership_snapshot":{"table":config.membership_table,"security_id_column":config.membership_security_id_column},"corporate_action_ledger":{"path":config.corporate_actions_path,"sha256":_file_sha256(config.corporate_actions_path)},"exchange_calendar":config.exchange_calendar,"dependency_versions":dependencies}
     encoded=json.dumps(payload,sort_keys=True,default=str).encode(); return {"sha256":hashlib.sha256(encoded).hexdigest(),"payload":payload}
 
 def enforce_interday_fingerprint(run_root: Path, fingerprint: dict, *, resume: bool) -> None:

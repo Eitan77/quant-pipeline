@@ -1,11 +1,34 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
 
-ScanRole = Literal["cross_sectional_scan", "context_only", "exact_candidate_only", "unavailable"]
-TargetFamily = Literal["daily_terminal", "time_of_day", "diagnostic_next_gap", "exact_only"]
-TestType = Literal["rank_ic", "top_minus_bottom_decile", "top_decile_minus_middle", "middle_minus_bottom_decile"]
+import numpy as np
+import pandas as pd
+
+
+ScanRole = Literal[
+    "cross_sectional_scan",
+    "context_only",
+    "exact_candidate_only",
+    "unavailable",
+]
+
+TargetFamily = Literal[
+    "daily_terminal",
+    "time_of_day",
+    "diagnostic_next_gap",
+    "exact_only",
+]
+
+TestType = Literal[
+    "rank_ic",
+    "top_minus_bottom_decile",
+    "top_decile_minus_middle",
+    "middle_minus_bottom_decile",
+]
+
 
 @dataclass(frozen=True)
 class InterdayFeatureSpec:
@@ -25,7 +48,8 @@ class InterdayFeatureSpec:
     scan_role: ScanRole
     status: str = "requested"
     unavailable_reason: str | None = None
-    definition_version: str = "v1"
+    definition_version: str = "v2"
+
 
 @dataclass(frozen=True)
 class InterdayTargetSpec:
@@ -47,19 +71,8 @@ class InterdayTargetSpec:
     overlap_sessions: int
     minimum_basket_members: int
     is_duplicate_reference: bool = False
+    definition_version: str = "v2"
 
-@dataclass(frozen=True)
-class ScanPairKey:
-    feature: str
-    target: str
-    test_type: TestType
-
-@dataclass(frozen=True)
-class MatrixLayout:
-    n_dates: int
-    n_symbols: int
-    date_ids: tuple[int, ...]
-    security_ids: tuple[str, ...]
 
 @dataclass(frozen=True)
 class BlockPlan:
@@ -67,3 +80,55 @@ class BlockPlan:
     target_block_size: int
     estimated_peak_bytes: int
     device: str
+
+
+@dataclass
+class FeatureBuildResult:
+    names: list[str]
+    values: np.ndarray                 # [feature, date, security]
+    valid: np.ndarray                  # same shape
+    specs: list[InterdayFeatureSpec]
+    build_records: list[dict]
+
+
+@dataclass
+class TargetBuildResult:
+    names: list[str]
+    total_returns: np.ndarray          # [target, date, security]
+    price_returns: np.ndarray          # [target, date, security]
+    log_total_returns: np.ndarray      # [target, date, security]
+    valid: np.ndarray                  # [target, date, security]
+    aligned_market_returns: np.ndarray # [target, date]
+    missing_reasons: np.ndarray        # int8 [target, date, security]
+    entry_date_ids: np.ndarray         # int32 [target, date]
+    exit_date_ids: np.ndarray          # int32 [target, date]
+    specs: list[InterdayTargetSpec]
+    build_records: list[dict]
+
+
+@dataclass
+class RankBinCache:
+    feature_names: list[str]
+    percentile_ranks: np.ndarray       # [feature, date, security]
+    deciles: np.ndarray                # int8, -1 invalid
+    quintiles: np.ndarray              # int8, -1 invalid
+    valid_counts: np.ndarray           # [feature, date]
+    distinct_counts: np.ndarray        # [feature, date]
+    tie_fraction: np.ndarray           # [feature, date]
+    persistence: pd.DataFrame
+
+
+@dataclass
+class DailyPairSeries:
+    rank_ic: np.ndarray
+    top_minus_bottom: np.ndarray
+    top_minus_middle: np.ndarray
+    middle_minus_bottom: np.ndarray
+    quintile_spread: np.ndarray
+
+    ic_cross_section_size: np.ndarray
+    top_coverage: np.ndarray
+    bottom_coverage: np.ndarray
+    middle_coverage: np.ndarray
+    quintile_top_coverage: np.ndarray
+    quintile_bottom_coverage: np.ndarray

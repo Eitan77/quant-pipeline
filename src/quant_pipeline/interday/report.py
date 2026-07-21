@@ -8,9 +8,14 @@ def write_report(root: Path, *, scan: pd.DataFrame, candidates: pd.DataFrame, me
     scan.to_csv(root/"scan_results.csv",index=False)
     candidates.to_csv(root/"candidates.csv",index=False)
     (root/"report.json").write_text(json.dumps(metadata,indent=2,default=str),encoding="utf-8")
-    required = ["source_schema.json", "dependency_versions.json", "calendar_contract.json",
-                "feature_registry.parquet", "target_registry.parquet", "scan_results.csv",
-                "candidates.csv", "readiness_report.json"]
+    required = [
+        "resolved_config.yaml", "fingerprint.json", "manifest.json", "readiness_report.json",
+        "source_schema.json", "dependency_versions.json", "calendar_contract.json", "source_provenance.json",
+        "panel_coverage.csv", "feature_coverage.csv", "target_coverage.csv", "feature_build_report.json",
+        "target_build_report.json", "feature_registry.parquet", "target_registry.parquet", "scan_plan.json",
+        "scan_results.csv", "candidates.csv", "candidate_summary.csv", "candidate_daily_series.parquet",
+        "candidate_exact_diagnostics.parquet", "performance_metrics.json", "run_journal.json", "report.md",
+    ]
     (root/"report.md").write_text(
         "# Interday 2A report\n\n"
         f"- Readiness: `{metadata.get('readiness','UNKNOWN')}`\n"

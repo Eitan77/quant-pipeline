@@ -41,6 +41,7 @@ def build_feature_registry(config: InterdayConfig) -> list[InterdayFeatureSpec]:
     return out
 
 def feature_definition_hash(spec): return hashlib.sha256(json.dumps(asdict(spec),sort_keys=True,default=str).encode()).hexdigest()
+def target_definition_hash(spec): return hashlib.sha256(json.dumps(asdict(spec),sort_keys=True,default=str).encode()).hexdigest()
 
 DAILY_CHECKPOINTS={1:("09:40","09:45","10:00","10:15","10:30","11:00","12:00","13:00","14:00","15:00","close5"),2:("open5","09:45","10:00","10:30","12:00","14:00","close5"),**{day:("open5","10:00","12:00","14:00","close5") for day in range(3,11)},12:("open5","12:00","close5"),14:("open5","12:00","close5"),18:("open5","12:00","close5"),20:("open5","12:00","close5")}
 

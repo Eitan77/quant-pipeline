@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import json
+import hashlib
 import importlib.metadata
 import duckdb
 import numpy as np
@@ -16,16 +17,32 @@ REQUIRED_BAR_COLUMNS = ("symbol","bar_start_ts","bar_end_ts","available_at_ts","
 
 @dataclass(frozen=True)
 class SourceProvenance:
-    catalog_path: str; source_table: str; feed: str; adjustment: str; start: str; discovery_end: str; row_count: int
-    raw_rows_considered: int = 0
-    deduplicated_rows: int = 0
-    daily_rows: int = 0
-    stable_security_id_source: str = "unknown"
+    catalog_path: str
+    source_table: str
+    source_start: str
+    analysis_start: str
+    discovery_end: str
+    raw_rows_considered: int
+    deduplicated_rows: int
+    daily_rows: int
+    stable_security_id_source: str
+    source_schema_hash: str
+    compact_file_sha256: str
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$.]*$")
 def validate_identifier(value: str) -> str:
     if not _IDENTIFIER.fullmatch(value): raise ValueError(f"Unsafe SQL identifier: {value!r}")
     return value
+
+def resolved_source_sql(*, source_table: str, security_master_table: str | None, native_security_id: bool) -> str:
+    source_table=validate_identifier(source_table)
+    if native_security_id:
+        identity_cte=f"""SELECT CAST(b.security_id AS VARCHAR) AS security_id, b.* FROM {source_table} AS b"""
+    else:
+        if not security_master_table: raise ValueError("Source lacks security_id and no security_master_table was configured")
+        security_master_table=validate_identifier(security_master_table)
+        identity_cte=f"""SELECT CAST(m.security_id AS VARCHAR) AS security_id, b.* FROM {source_table} AS b JOIN {security_master_table} AS m ON m.symbol=b.symbol AND CAST(b.session_date AS DATE)>=CAST(m.valid_from AS DATE) AND (m.valid_to IS NULL OR CAST(b.session_date AS DATE)<CAST(m.valid_to AS DATE)) AND (m.known_at_ts IS NULL OR CAST(m.known_at_ts AS TIMESTAMPTZ)<=CAST(b.available_at_ts AS TIMESTAMPTZ))"""
+    return f"""WITH identity_resolved AS ({identity_cte}), filtered AS (SELECT security_id,symbol,CAST(session_date AS DATE) AS session_date,CAST(bar_start_ts AS TIMESTAMPTZ) AS bar_start_ts,CAST(bar_end_ts AS TIMESTAMPTZ) AS bar_end_ts,CAST(available_at_ts AS TIMESTAMPTZ) AS available_at_ts,CAST(ingested_at AS TIMESTAMPTZ) AS ingested_at,CAST(open AS DOUBLE) AS open,CAST(high AS DOUBLE) AS high,CAST(low AS DOUBLE) AS low,CAST(close AS DOUBLE) AS close,CAST(vwap AS DOUBLE) AS vwap,CAST(volume AS DOUBLE) AS volume FROM identity_resolved WHERE feed=? AND adjustment=? AND bar_complete AND CAST(session_date AS DATE) BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)), deduplicated AS (SELECT * FROM filtered QUALIFY ROW_NUMBER() OVER (PARTITION BY security_id,bar_start_ts ORDER BY ingested_at DESC)=1) SELECT * FROM deduplicated"""
 
 def _security_ids(connection: duckdb.DuckDBPyConnection, symbols: list[str]) -> dict[str, str]:
     try:
@@ -53,26 +70,9 @@ def load_projected_bars(config: InterdayConfig) -> tuple[pd.DataFrame, SourcePro
             raise ValueError(f"Source schema missing columns: {sorted(missing)}")
         if config.security_id_column not in source_columns and not config.security_master_table and config.require_stable_security_id:
             raise ValueError("Stable security_id is unavailable; configure a historical security master")
-        master_join = ""
-        if config.security_id_column in source_columns:
-            id_column = f"b.{config.security_id_column} AS security_id"
-        elif config.security_master_table:
-            validate_identifier(config.security_master_table)
-            master_columns = {r[0] for r in con.execute(f"describe {config.security_master_table}").fetchall()}
-            if not {"symbol", "security_id", "valid_from"}.issubset(master_columns):
-                raise ValueError("Historical security master must expose symbol, security_id, and valid_from")
-            valid_to = "m.valid_to" if "valid_to" in master_columns else "NULL"
-            master_join = f"join {config.security_master_table} m on m.symbol=b.symbol and cast(b.session_date as date)>=cast(m.valid_from as date) and ({valid_to} is null or cast(b.session_date as date)<cast({valid_to} as date))"
-            id_column = "m.security_id AS security_id"
-        else:
-            id_column = "NULL::VARCHAR AS security_id"
-        query = f"""select {id_column},symbol,bar_start_ts,bar_end_ts,available_at_ts,open,high,low,close,vwap,volume,session_date,ingested_at
-                    from {config.source_table} b {master_join}
-                    where b.feed=? and b.adjustment=? and b.bar_complete
-                      and cast(b.session_date as date)>=cast(? as date)
-                      and cast(b.session_date as date)<cast(? as date)
-                    order by b.symbol,b.bar_start_ts,b.ingested_at"""
-        frame = con.execute(query, [config.feed, config.adjustment, start, config.sealed_holdout_start]).fetchdf()
+        native_security_id = config.security_id_column in source_columns
+        query = resolved_source_sql(source_table=config.source_table, security_master_table=config.security_master_table, native_security_id=native_security_id)
+        frame = con.execute(query, [config.feed, config.source_adjustment, start, config.discovery_end]).fetchdf()
         if frame.empty: raise ValueError("No five-minute bars matched Interday 2A source filters")
         symbols = sorted(frame.symbol.dropna().unique().tolist() + [config.benchmark_symbol])
         ids = _security_ids(con, sorted(set(symbols)))
@@ -81,9 +81,9 @@ def load_projected_bars(config: InterdayConfig) -> tuple[pd.DataFrame, SourcePro
     for col in ("bar_start_ts","bar_end_ts","available_at_ts","ingested_at"):
         frame[col] = pd.to_datetime(frame[col], utc=True)
     frame["session_date"] = pd.to_datetime(frame.session_date).dt.normalize()
-    frame = frame.sort_values(["symbol","bar_start_ts","ingested_at"], kind="stable").drop_duplicates(["symbol","bar_start_ts"], keep="last").reset_index(drop=True)
+    frame = frame.sort_values(["security_id","bar_start_ts","ingested_at"], kind="stable").reset_index(drop=True)
     if (frame.available_at_ts < frame.bar_end_ts).any(): raise ValueError("Source contains bars unavailable before completion")
-    if frame.duplicated(["symbol","bar_start_ts"]).any(): raise ValueError("Duplicate source bars")
+    if frame.duplicated(["security_id","bar_start_ts"]).any(): raise ValueError("Duplicate source bars")
     if (frame[["open","high","low","close"]].to_numpy(float) <= 0).any(): raise ValueError("Source contains nonpositive prices")
     if (frame.volume < 0).any(): raise ValueError("Source contains negative volume")
     if frame.session_date.max() >= pd.Timestamp(config.sealed_holdout_start): raise ValueError("Source reaches sealed holdout")
@@ -96,7 +96,8 @@ def load_projected_bars(config: InterdayConfig) -> tuple[pd.DataFrame, SourcePro
     else: frame["security_id"] = frame.security_id.astype(str)
     frame["stable_security_id"] = frame.security_id
     frame["source_has_native_security_id"] = config.security_id_column in frame.columns
-    provenance = SourceProvenance(config.catalog_path, config.source_table, config.feed, config.adjustment, config.source_start, config.discovery_end, len(frame), len(frame), len(frame), 0, "source.security_id")
+    schema_hash=hashlib.sha256(json.dumps(sorted(source_columns)).encode()).hexdigest()
+    provenance = SourceProvenance(config.catalog_path, config.source_table, config.source_start, config.analysis_start, config.discovery_end, len(frame), len(frame), 0, "native.security_id" if config.security_id_column in source_columns else "security_master", schema_hash, "")
     return frame, provenance
 
 def load_compact_daily_inputs(config: InterdayConfig):
@@ -133,6 +134,7 @@ def load_compact_daily_inputs(config: InterdayConfig):
             valid_to="m.valid_to" if "valid_to" in master_columns else "NULL"
             identity_join=f"JOIN {config.security_master_table} m ON m.symbol=b.symbol AND CAST(b.session_date AS DATE)>=CAST(m.valid_from AS DATE) AND ({valid_to} IS NULL OR CAST(b.session_date AS DATE)<CAST({valid_to} AS DATE))"
         identity_projection = f", {identity_select}" if identity_select else ""
+        identity_key = "b.security_id" if config.security_id_column in source_columns else "m.security_id"
         if config.require_membership and config.membership_table not in tables: raise ValueError(f"Required membership table is missing: {config.membership_table}")
         con.register("interday_schedule",schedule)
         con.register("interday_checkpoint_schedule",checkpoint_schedule)
@@ -151,7 +153,7 @@ def load_compact_daily_inputs(config: InterdayConfig):
                 SELECT b.*{identity_projection}, CAST(b.session_date AS DATE) AS session_day,
                        s.open_ts AS scheduled_open, s.close_ts AS scheduled_close,
                        s.shortened_session, cs.* EXCLUDE (session_date),
-                       row_number() OVER (PARTITION BY b.security_id, b.symbol, b.bar_start_ts ORDER BY b.ingested_at DESC) AS source_rn
+                       row_number() OVER (PARTITION BY {identity_key}, b.symbol, b.bar_start_ts ORDER BY b.ingested_at DESC) AS source_rn
                 FROM {config.source_table} b {identity_join}
                 JOIN interday_schedule s ON CAST(b.session_date AS DATE)=s.session_date
                 JOIN interday_checkpoint_schedule cs ON CAST(b.session_date AS DATE)=cs.session_date
@@ -187,7 +189,7 @@ def load_compact_daily_inputs(config: InterdayConfig):
                    {', '.join(cp_expr)}
             FROM numbered GROUP BY {', '.join(group_columns)} ORDER BY session_date,symbol
         """
-        daily=con.execute(query,[config.feed,config.adjustment,start,config.sealed_holdout_start]).fetchdf()
+        daily=con.execute(query,[config.feed,config.source_adjustment,start,config.sealed_holdout_start]).fetchdf()
     finally: con.close()
     for c in ("session_date",): daily[c]=pd.to_datetime(daily[c]).dt.normalize()
     if "security_id" not in daily or daily.security_id.isna().all():
@@ -196,7 +198,7 @@ def load_compact_daily_inputs(config: InterdayConfig):
     checkpoint_cols=["security_id","symbol","session_date"]+[c for c in CHECKPOINTS if c in daily]
     checkpoints=daily[checkpoint_cols].copy()
     coverage=daily[["security_id","symbol","session_date","session_complete"]].copy(); coverage["expected_bars"]=(daily.scheduled_close-daily.scheduled_open).dt.total_seconds().div(300).astype(int); coverage["actual_bars"]=np.where(daily.session_complete,coverage.expected_bars,np.nan); coverage["missing_checkpoints"]=daily[list(CHECKPOINTS)].isna().sum(axis=1)
-    return daily,checkpoints,coverage,SourceProvenance(config.catalog_path,config.source_table,config.feed,config.adjustment,config.source_start,config.discovery_end,len(daily),0,0,len(daily),"source.security_id")
+    return daily,checkpoints,coverage,SourceProvenance(config.catalog_path,config.source_table,config.source_start,config.analysis_start,config.discovery_end,0,0,len(daily),"source.security_id", "", "")
 
 def schema_check(config: InterdayConfig, output_root: Path) -> dict:
     output_root.mkdir(parents=True, exist_ok=True)
@@ -224,9 +226,11 @@ def schema_check(config: InterdayConfig, output_root: Path) -> dict:
         except Exception as exc:
             action_report["error"] = str(exc)
     action_report["ready"] = bool(action_report["exists"] and (not config.require_cash_dividends or action_report.get("has_cash_dividends", False)) and (not config.require_delisting_outcomes or action_report.get("has_delisting_outcomes", False)))
+    membership_cols={x["column_name"] for x in schema.get(config.membership_table, [])}
     report = {"tables": tables, "schema": schema, "required_bar_columns": list(REQUIRED_BAR_COLUMNS),
               "security_id_source_column": config.security_id_column if config.security_id_column in source_cols else None,
               "stable_security_id_available": stable_available,
+              "membership_security_id_available": config.membership_security_id_column in membership_cols,
               "security_id_policy": "historical source/security-master identity is mandatory; symbol fallback is disabled in production",
               "corporate_actions": action_report, "corporate_actions_ready": action_report["ready"], "cuda_available": _cuda_available(), "bar_timestamp_contract": "bar_end_ts is the completed five-minute VWAP endpoint"}
     (output_root / "source_schema.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")

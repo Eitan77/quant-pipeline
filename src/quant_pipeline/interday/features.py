@@ -2,9 +2,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import numpy as np
+import pandas as pd
 from .config import InterdayConfig
 from .models import InterdayFeatureSpec
-from .primitives import PrimitiveBundle, rolling_mean, rolling_std, rolling_max, rolling_min, rolling_sum, shift
+from .primitives import PrimitiveBundle, rolling_mean, rolling_std, rolling_max, rolling_min, rolling_sum, shift, shift_2d, rolling_sum_2d, rolling_mean_2d
+
+def rolling_median(matrix, window, min_periods=None):
+    minimum=window if min_periods is None else min_periods; x=np.asarray(matrix,float); out=np.full(x.shape,np.nan,np.float32)
+    for i in range(window-1,len(x)):
+        segment=x[i-window+1:i+1]; count=np.isfinite(segment).sum(axis=0); value=np.nanmedian(segment,axis=0); out[i]=np.where(count>=minimum,value,np.nan)
+    return out
 
 @dataclass
 class FeatureBuildResult:
@@ -14,7 +21,22 @@ def safe_divide(a,b):
     aa,bb=np.broadcast_arrays(np.asarray(a),np.asarray(b)); out=np.full(aa.shape,np.nan,np.float32); mask=np.isfinite(aa)&np.isfinite(bb)&(np.abs(bb)>1e-12); out[mask]=(aa[mask]/bb[mask]).astype(np.float32); return out
 
 def rolling_beta(stock_returns, market_returns, *, window, minimum_observations):
-    market=np.broadcast_to(np.asarray(market_returns)[:,None],stock_returns.shape); x=shift(market,1); y=shift(stock_returns,1); valid=np.isfinite(x)&np.isfinite(y); x=np.where(valid,x,np.nan); y=np.where(valid,y,np.nan); mx=rolling_mean(x,window,minimum_observations); my=rolling_mean(y,window,minimum_observations); mxy=rolling_mean(x*y,window,minimum_observations); mx2=rolling_mean(x*x,window,minimum_observations); return safe_divide(mxy-mx*my,mx2-mx*mx)
+    market = np.broadcast_to(np.asarray(market_returns)[:, None], stock_returns.shape)
+    stock_lag = shift_2d(stock_returns, 1)
+    market_lag = shift_2d(market, 1)
+    valid = np.isfinite(stock_lag) & np.isfinite(market_lag)
+    x = np.where(valid, market_lag, np.nan)
+    y = np.where(valid, stock_lag, np.nan)
+    mean_x = rolling_mean_2d(x, window, minimum_observations)
+    mean_y = rolling_mean_2d(y, window, minimum_observations)
+    mean_xy = rolling_mean_2d(x * y, window, minimum_observations)
+    mean_x2 = rolling_mean_2d(x * x, window, minimum_observations)
+    covariance = mean_xy - mean_x * mean_y
+    variance = mean_x2 - mean_x * mean_x
+    output = np.full_like(covariance, np.nan, dtype=np.float32)
+    valid_variance = np.isfinite(variance) & (variance > 1e-12)
+    output[valid_variance] = (covariance[valid_variance] / variance[valid_variance]).astype(np.float32)
+    return output
 
 def rolling_days_since(values, window, *, maximum=True):
     values=np.asarray(values,float); out=np.full(values.shape,np.nan,np.float32)
@@ -24,18 +46,22 @@ def rolling_days_since(values, window, *, maximum=True):
         chosen=np.argmax(segment[::-1],axis=0) if maximum else np.argmin(segment[::-1],axis=0); out[t]=chosen.astype(np.float32)
     return out
 
+
+def rolling_days_since_extreme(values: np.ndarray, window: int, use_maximum: bool) -> np.ndarray:
+    return rolling_days_since(values, window, maximum=use_maximum)
+
 def _window_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpec], config: InterdayConfig) -> dict[str,np.ndarray]:
     out={}; close=primitives.close; log=primitives.close_log; ret=primitives.close_return; names={s.name for s in specs}; windows=sorted({s.lookback_sessions for s in specs if s.lookback_sessions})
     for n in windows:
         if f"return_{n}" in names: out[f"return_{n}"]=np.expm1(log-shift(log,n)).astype(np.float32)
         if f"return_skip1_{n}" in names: out[f"return_skip1_{n}"]=np.expm1(shift(log,1)-shift(log,n+1)).astype(np.float32)
         if f"return_vol_scaled_{n}" in names: out[f"return_vol_scaled_{n}"]=safe_divide(np.expm1(log-shift(log,n)),shift(rolling_std(ret,20,15),1))
-        if f"positive_day_fraction_{n}" in names: out[f"positive_day_fraction_{n}"]=rolling_mean((ret>0).astype(float),n,n)
+        if f"positive_day_fraction_{n}" in names: out[f"positive_day_fraction_{n}"]=rolling_mean(np.where(np.isfinite(ret), (ret>0).astype(np.float32), np.nan),n,n)
         if f"cumulative_overnight_return_{n}" in names: out[f"cumulative_overnight_return_{n}"]=np.expm1(rolling_sum(np.log1p(primitives.overnight_return),n,n)).astype(np.float32)
         if f"cumulative_regular_session_return_{n}" in names: out[f"cumulative_regular_session_return_{n}"]=np.expm1(rolling_sum(np.log1p(primitives.regular_return),n,n)).astype(np.float32)
         if f"overnight_minus_regular_return_{n}" in names: out[f"overnight_minus_regular_return_{n}"]=out.get(f"cumulative_overnight_return_{n}",np.nan)-out.get(f"cumulative_regular_session_return_{n}",np.nan)
-        if f"positive_overnight_fraction_{n}" in names: out[f"positive_overnight_fraction_{n}"]=rolling_mean((primitives.overnight_return>0).astype(float),n,n)
-        if f"positive_regular_fraction_{n}" in names: out[f"positive_regular_fraction_{n}"]=rolling_mean((primitives.regular_return>0).astype(float),n,n)
+        if f"positive_overnight_fraction_{n}" in names: out[f"positive_overnight_fraction_{n}"]=rolling_mean(np.where(np.isfinite(primitives.overnight_return),(primitives.overnight_return>0).astype(float),np.nan),n,n)
+        if f"positive_regular_fraction_{n}" in names: out[f"positive_regular_fraction_{n}"]=rolling_mean(np.where(np.isfinite(primitives.regular_return),(primitives.regular_return>0).astype(float),np.nan),n,n)
         if f"path_efficiency_{n}" in names: out[f"path_efficiency_{n}"]=safe_divide(np.abs(rolling_sum(np.log1p(ret),n,n)),rolling_sum(np.abs(np.log1p(ret)),n,n))
         if f"trend_slope_{n}" in names or f"trend_r2_{n}" in names:
             x=np.linspace(-1,1,n); den=np.sum((x-x.mean())**2); slope=np.full_like(log,np.nan); r2=np.full_like(log,np.nan)
@@ -51,16 +77,20 @@ def _window_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpe
         if f"distance_from_sma_{n}" in names: out[f"distance_from_sma_{n}"]=safe_divide(close,rolling_mean(close,n,n))-1
         if f"realized_vol_{n}" in names: out[f"realized_vol_{n}"]=rolling_std(ret,n,n)
         if f"downside_vol_{n}" in names: out[f"downside_vol_{n}"]=np.sqrt(rolling_mean(np.minimum(ret,0.0)**2,n,max(3,int(.75*n))))
-        if f"atr_pct_{n}" in names: out[f"atr_pct_{n}"]=rolling_mean((primitives.high-primitives.low)/close,n,n)
+        if f"atr_pct_{n}" in names:
+            prior = shift_2d(close, 1)
+            true_range = np.nanmax(np.stack([primitives.high - primitives.low, np.abs(primitives.high - prior), np.abs(primitives.low - prior)], axis=0), axis=0)
+            atr = rolling_mean_2d(true_range, n, minimum_observations=max(3, int(0.75 * n)))
+            out[f"atr_pct_{n}"] = safe_divide(atr, close)
         if f"relative_volume_{n}" in names: out[f"relative_volume_{n}"]=safe_divide(primitives.volume,shift(rolling_mean(primitives.volume,n,n),1))
         if f"relative_dollar_volume_{n}" in names: out[f"relative_dollar_volume_{n}"]=safe_divide(primitives.dollar_volume,shift(rolling_mean(primitives.dollar_volume,n,n),1))
         if f"volume_zscore_{n}" in names: out[f"volume_zscore_{n}"]=safe_divide(primitives.volume-shift(rolling_mean(primitives.volume,n,n),1),shift(rolling_std(primitives.volume,n,n),1))
         if f"dollar_volume_zscore_{n}" in names: out[f"dollar_volume_zscore_{n}"]=safe_divide(primitives.dollar_volume-shift(rolling_mean(primitives.dollar_volume,n,n),1),shift(rolling_std(primitives.dollar_volume,n,n),1))
-        if f"median_dollar_volume_{n}" in names: out[f"median_dollar_volume_{n}"]=rolling_mean(primitives.dollar_volume,n,n)
-    beta=rolling_beta(primitives.close_return,primitives.market_return,window=config.beta_primary_window_sessions,minimum_observations=config.beta_minimum_observations); market=np.broadcast_to(primitives.market_return[:,None],ret.shape); residual=ret-beta*market
+        if f"median_dollar_volume_{n}" in names: out[f"median_dollar_volume_{n}"]=rolling_median(primitives.dollar_volume,n,max(3,int(0.75*n)))
+    beta=rolling_beta(primitives.close_return,primitives.market_return,window=config.beta_primary_window_sessions,minimum_observations=config.beta_minimum_observations); market=np.broadcast_to(primitives.market_return[:,None],ret.shape); residual_log=np.log1p(np.clip(ret,-.999999,None))-beta*np.log1p(np.clip(market,-.999999,None))
     for s in specs:
         if s.name.startswith("beta_residual_return_"):
-            n=int(s.lookback_sessions); out[s.name]=np.expm1(rolling_sum(np.log1p(np.clip(residual,-.999999,None)),n,n)).astype(np.float32)
+            n=int(s.lookback_sessions); out[s.name]=np.expm1(rolling_sum(residual_log,n,n)).astype(np.float32)
         if s.name.startswith("sector_residual_return_") and primitives.sector_codes is not None:
             n=int(s.lookback_sessions); raw=np.expm1(log-shift(log,n)); group=leave_one_out_group_mean(raw,primitives.sector_codes,np.isfinite(raw),config.minimum_sector_members_ex_focal); out[s.name]=raw-group
     return out
@@ -79,9 +109,20 @@ def _current_features(primitives,specs):
     for s in specs:
         if s.name in direct: out[s.name]=direct[s.name]
         elif s.name.startswith("gap_fill_fraction_"):
-            fraction={"gap_fill_fraction_30m":.5,"gap_fill_fraction_60m":1.,"gap_fill_fraction_close":1.}.get(s.name,1.); checkpoint=op + (close-op)*fraction; out[s.name]=np.where(np.abs(gap)>=.001,np.clip((np.sign(-gap)*(checkpoint/op-1))/np.abs(gap),-3,3),np.nan)
+            checkpoint = {"gap_fill_fraction_30m": primitives.checkpoint_30m, "gap_fill_fraction_60m": primitives.checkpoint_60m, "gap_fill_fraction_close": primitives.close5}.get(s.name)
+            if checkpoint is None:
+                continue
+            out[s.name] = gap_fill_fraction(shift(close, 1), primitives.open5 if primitives.open5 is not None else op, checkpoint)
         elif s.name.startswith("return_shock_vs_prior20_vol"): out[s.name]=safe_divide(primitives.close_return,shift(rolling_std(primitives.close_return,20,15),1))
     return out
+
+def gap_fill_fraction(prior_close: np.ndarray, open5: np.ndarray, checkpoint: np.ndarray) -> np.ndarray:
+    gap = open5 / prior_close - 1.0
+    movement = checkpoint / open5 - 1.0
+    output = np.full_like(gap, np.nan, dtype=np.float32)
+    valid = np.isfinite(gap) & np.isfinite(movement) & (np.abs(gap) >= 0.001)
+    output[valid] = (np.sign(-gap[valid]) * movement[valid] / np.abs(gap[valid])).astype(np.float32)
+    return output
 
 def _fallback_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpec], config: InterdayConfig):
     """Small family fallbacks for registry members whose inputs are optional."""
@@ -135,13 +176,21 @@ def _fallback_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureS
     return out
 
 def build_feature_matrix(primitives: PrimitiveBundle, registry: list[InterdayFeatureSpec], config: InterdayConfig) -> FeatureBuildResult:
-    requested=[s for s in registry if s.status=="requested" and s.scan_role in {"cross_sectional_scan","context_only"}]; built={}; records=[]; by_family=_window_features(primitives,requested,config); by_family.update(_current_features(primitives,requested)); by_family.update(_fallback_features(primitives,requested,config))
+    requested=[s for s in registry if s.status=="requested" and s.scan_role=="cross_sectional_scan"]; built={}; records=[]; by_family=_window_features(primitives,requested,config); by_family.update(_current_features(primitives,requested)); by_family.update(_fallback_features(primitives,requested,config))
     for s in requested:
         value=by_family.get(s.name)
-        if value is None: records.append({"feature":s.name,"status":"failed","reason":"No builder for registered feature family"})
+        if value is None: records.append({"feature":s.name,"status":"unavailable","reason":"No builder for registered feature family"})
         else: built[s.name]=np.asarray(value,dtype=np.float32); records.append({"feature":s.name,"status":"built","reason":""})
     names=sorted(built); values=np.stack([built[n] for n in names],axis=0) if names else np.empty((0,primitives.close.shape[0],primitives.close.shape[1]),np.float32)
+    missing=[r for r in records if r["status"] not in {"built","unavailable"}]
+    if missing: raise ValueError(f"Requested feature build failures: {missing}")
     specs={s.name:s for s in registry}; return FeatureBuildResult(names,values,np.isfinite(values),[specs[n] for n in names],records)
+
+def build_context_matrix(primitives: PrimitiveBundle, registry: list[InterdayFeatureSpec], config: InterdayConfig) -> pd.DataFrame:
+    context=[s for s in registry if s.status=="requested" and s.scan_role=="context_only"]; values=_fallback_features(primitives,context,config); frame={"date_id":np.arange(primitives.close.shape[0],dtype=np.int32)}
+    for spec in context:
+        frame[spec.name]=np.nanmean(values.get(spec.name,np.full_like(primitives.close,np.nan)),axis=1)
+    return pd.DataFrame(frame)
 
 def feature_content_hash(values,valid):
     h=hashlib.sha256(); h.update(np.ascontiguousarray(np.where(valid,values,0),dtype=np.float32).view(np.uint8)); h.update(np.ascontiguousarray(valid).view(np.uint8)); return h.hexdigest()

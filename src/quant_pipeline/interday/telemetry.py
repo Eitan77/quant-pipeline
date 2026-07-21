@@ -1,6 +1,9 @@
 from __future__ import annotations
 from contextlib import contextmanager
 import threading,time
+import json, hashlib, traceback
+from pathlib import Path
+import pandas as pd
 try:
     import psutil
 except ImportError:
@@ -62,8 +65,23 @@ class StageLedger:
                 for block in iter(lambda: handle.read(1 << 20), b""): h.update(block)
             if h.hexdigest() != entry.get("sha256"): return False
         return bool(x.get("artifacts")) or bool(x.get("metadata",{}).get("explicit_no_candidates"))
-    def invalidate_from(self,stage):
-        order=list(self.STAGES); start=order.index(stage)
-        for name in order[start:]:
+    def downstream_closure(self,stage):
+        affected={stage}; changed=True
+        while changed:
+            changed=False
+            for candidate,deps in self.DEPENDENCIES.items():
+                if candidate not in affected and any(dep in affected for dep in deps): affected.add(candidate); changed=True
+        return affected
+    def invalidate_stage_and_dependents(self,stage):
+        for name in self.downstream_closure(stage):
             p=self.marker(name)
             if p.exists(): p.unlink()
+    def invalidate_from(self,stage): self.invalidate_stage_and_dependents(stage)
+
+class Telemetry:
+    def __init__(self,path): self.path=Path(path); self.data={}
+    def record(self,stage,**metrics): self.data[stage]=metrics; self.path.write_text(json.dumps(self.data,indent=2,default=str),encoding="utf-8")
+
+def write_failure(root: Path, *, active_stage: str, fingerprint: str|None, error: BaseException) -> None:
+    payload={"status":"failed","stage":active_stage,"fingerprint":fingerprint,"exception_class":type(error).__name__,"message":str(error),"traceback":traceback.format_exc(),"timestamp":pd.Timestamp.utcnow().isoformat()}
+    path=root/"failure.json"; tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2,default=str),encoding="utf-8"); tmp.replace(path)

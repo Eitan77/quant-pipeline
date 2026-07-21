@@ -67,9 +67,10 @@ def build_daily_panel(bars: pd.DataFrame, calendar: TradingCalendar, config: Int
 
 def attach_membership_and_eligibility(build: DailyPanelBuild, membership: pd.DataFrame, config: InterdayConfig) -> DailyPanelBuild:
     daily = build.daily.copy(); membership = membership.copy()
+    if membership.empty and config.require_membership: raise ValueError("Required point-in-time membership is empty")
     if not membership.empty:
-        membership["session_date"] = pd.to_datetime(membership["date"]).dt.normalize()
-        daily = daily.merge(membership[["symbol","session_date","is_member"]].drop_duplicates(["symbol","session_date"]), on=["symbol","session_date"], how="left")
+        if "security_id" not in membership.columns: raise ValueError("Membership must be keyed by security_id")
+        daily = daily.merge(membership[["security_id","session_date","is_member"]].drop_duplicates(["security_id","session_date"]), on=["security_id","session_date"], how="left")
     else: daily["is_member"] = daily.symbol.eq(config.benchmark_symbol)
     daily["pit_member"] = daily.is_member.fillna(False) | daily.symbol.eq(config.benchmark_symbol)
     daily["sector_id"] = np.nan; daily["industry_id"] = np.nan
@@ -81,5 +82,13 @@ def attach_membership_and_eligibility(build: DailyPanelBuild, membership: pd.Dat
     daily["scan_eligible"] = daily.analysis_eligible
     daily["corporate_action_valid"] = True
     daily["available_at_ts"] = pd.to_datetime(daily.available_at_ts, utc=True)
+    checkpoint_columns = [c for c in ("open5", "open15", "09:40", "09:45", "10:00", "11:00", "12:00", "close15", "close5") if c in build.checkpoints]
+    if checkpoint_columns:
+        daily = daily.merge(
+            build.checkpoints[["security_id", "session_date", *checkpoint_columns]],
+            on=["security_id", "session_date"],
+            how="left",
+            validate="one_to_one",
+        )
     cps = build.checkpoints.merge(daily[["security_id","session_date","analysis_eligible"]], on=["security_id","session_date"], how="left")
     return DailyPanelBuild(daily, cps, build.coverage)
