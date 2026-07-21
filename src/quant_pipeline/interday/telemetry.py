@@ -32,14 +32,36 @@ class StageLedger:
     DEPENDENCIES={"source":(),"panel":("source",),"features":("panel",),"targets":("panel",),"ranks":("features",),"scan":("ranks","targets"),"finalize":("scan",),"diagnostics":("finalize","panel","features","targets","ranks"),"report":("finalize","diagnostics")}
     def __init__(self,root): self.root=root; root.mkdir(parents=True,exist_ok=True)
     def marker(self,stage): return self.root/f"stage_{stage}.json"
-    def complete(self,stage,fingerprint,artifacts):
-        import json,datetime
-        p=self.marker(stage); tmp=p.with_suffix(".tmp"); tmp.write_text(json.dumps({"stage":stage,"fingerprint":fingerprint,"status":"complete","artifacts":[str(x) for x in artifacts],"completed_at":datetime.datetime.now(datetime.timezone.utc).isoformat()},indent=2),encoding="utf-8"); tmp.replace(p)
+    def complete(self,stage,fingerprint,artifacts,*,metadata=None):
+        import hashlib,json,datetime
+        entries=[]
+        for item in artifacts:
+            path=__import__('pathlib').Path(item)
+            if not path.exists(): raise FileNotFoundError(f"Missing {stage} artifact: {path}")
+            h=hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""): h.update(block)
+            entries.append({"path":str(path),"size":path.stat().st_size,"sha256":h.hexdigest()})
+        if not entries and not (metadata or {}).get("explicit_no_candidates",False):
+            raise ValueError(f"Stage {stage} cannot be complete without artifacts")
+        payload={"stage":stage,"fingerprint":fingerprint,"status":"complete","artifacts":entries,"completed_at":datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        if metadata: payload["metadata"]=metadata
+        p=self.marker(stage); tmp=p.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2,default=str),encoding="utf-8"); tmp.replace(p)
     def valid(self,stage,fingerprint):
         import json
         p=self.marker(stage)
         if not p.exists(): return False
-        x=json.loads(p.read_text(encoding="utf-8")); return x.get("status")=="complete" and x.get("fingerprint")==fingerprint and all(__import__('pathlib').Path(a).exists() for a in x.get("artifacts",[]))
+        import hashlib
+        x=json.loads(p.read_text(encoding="utf-8"))
+        if x.get("status") != "complete" or x.get("fingerprint") != fingerprint: return False
+        for entry in x.get("artifacts",[]):
+            path=__import__('pathlib').Path(entry["path"])
+            if not path.exists() or path.stat().st_size != entry.get("size"): return False
+            h=hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""): h.update(block)
+            if h.hexdigest() != entry.get("sha256"): return False
+        return bool(x.get("artifacts")) or bool(x.get("metadata",{}).get("explicit_no_candidates"))
     def invalidate_from(self,stage):
         order=list(self.STAGES); start=order.index(stage)
         for name in order[start:]:

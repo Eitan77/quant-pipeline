@@ -30,7 +30,7 @@ def join_effective_dated_metadata(panel: pd.DataFrame, metadata: pd.DataFrame, *
     return pd.concat([panel.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
 
 def build_daily_panel(bars: pd.DataFrame, calendar: TradingCalendar, config: InterdayConfig) -> DailyPanelBuild:
-    schedule = calendar.clocks(config.start, config.discovery_end).set_index("session_date")
+    schedule = calendar.clocks(config.source_start, config.discovery_end).set_index("session_date")
     rows, cps, coverage = [], [], []
     for (security_id, symbol, session_date), group in bars.groupby(["security_id","symbol","session_date"], sort=False):
         if session_date not in schedule.index: continue
@@ -43,7 +43,7 @@ def build_daily_panel(bars: pd.DataFrame, calendar: TradingCalendar, config: Int
         first, last = group.iloc[0], group.iloc[-1]
         first_hour = group.loc[group.bar_end_ts.le(open_ts + pd.Timedelta(hours=1))]
         last_hour = group.loc[group.bar_start_ts.ge(close_ts - pd.Timedelta(hours=1))]
-        rows.append({"security_id":security_id,"symbol":symbol,"session_date":session_date,"scheduled_open":open_ts,"scheduled_close":close_ts,"shortened_session":bool(c.shortened_session),"session_complete":complete,"available_at_ts":group.available_at_ts.max(),"open":float(first.open),"high":float(group.high.max()),"low":float(group.low.min()),"close":float(last.close),"session_vwap":float(dv.sum()/vol.sum()) if vol.sum() else np.nan,"volume":float(vol.sum()),"dollar_volume":float(dv.sum()),"first_5m_vwap":float(first.vwap),"first_15m_vwap":float(group.head(3).pipe(lambda x:(x.vwap*x.volume).sum()/x.volume.sum())) if len(group)>=3 else np.nan,"last_5m_vwap":float(last.vwap),"last_15m_vwap":float(group.tail(3).pipe(lambda x:(x.vwap*x.volume).sum()/x.volume.sum())) if len(group)>=3 else np.nan,"first_60m_return":float(first_hour.iloc[-1].close/first.open-1) if len(first_hour) else np.nan,"last_60m_return":float(last.close/last_hour.iloc[0].open-1) if len(last_hour) else np.nan,"open_30m_volume":float(group.loc[group.bar_end_ts.le(open_ts+pd.Timedelta(minutes=30)),"volume"].sum()),"close_30m_volume":float(group.loc[group.bar_start_ts.ge(close_ts-pd.Timedelta(minutes=30)),"volume"].sum())})
+        rows.append({"security_id":security_id,"symbol":symbol,"session_date":session_date,"scheduled_open":open_ts,"scheduled_close":close_ts,"shortened_session":bool(c.shortened_session),"session_complete":complete,"available_at_ts":group.available_at_ts.max(),"open":float(first.open),"high":float(group.high.max()),"low":float(group.low.min()),"close":float(last.close),"session_vwap":float(dv.sum()/vol.sum()) if vol.sum() else np.nan,"volume":float(vol.sum()),"dollar_volume":float(dv.sum()),"first_5m_vwap":float(first.vwap),"first_15m_vwap":float(group.head(3).pipe(lambda x:(x.vwap*x.volume).sum()/x.volume.sum())) if len(group)>=3 else np.nan,"last_5m_vwap":float(last.vwap),"last_15m_vwap":float(group.tail(3).pipe(lambda x:(x.vwap*x.volume).sum()/x.volume.sum())) if len(group)>=3 else np.nan,"first_60m_return":float(first_hour.iloc[-1].close/first.open-1) if len(first_hour) else np.nan,"last_60m_return":float(last.close/last_hour.iloc[0].open-1) if len(last_hour) else np.nan,"open_30m_volume":float(group.loc[group.bar_end_ts.le(open_ts+pd.Timedelta(minutes=30)),"volume"].sum()),"close_30m_volume":float(group.loc[group.bar_start_ts.ge(close_ts-pd.Timedelta(minutes=30)),"volume"].sum()),"first_60m_volume":float(group.loc[group.bar_end_ts.le(open_ts+pd.Timedelta(minutes=60)),"volume"].sum()),"last_60m_volume":float(group.loc[group.bar_start_ts.ge(close_ts-pd.Timedelta(minutes=60)),"volume"].sum()),"largest_5m_volume":float(group.volume.max()),"midday":float(group.loc[group.bar_end_ts.eq(open_ts+pd.Timedelta(minutes=150)),"vwap"].iloc[0]) if (group.bar_end_ts==open_ts+pd.Timedelta(minutes=150)).any() else np.nan})
         record = {"security_id":security_id,"symbol":symbol,"session_date":session_date}; missing=0
         clock=SessionClock(pd.Timestamp(session_date), open_ts, close_ts, bool(c.shortened_session))
         for checkpoint in CHECKPOINTS:
@@ -73,8 +73,11 @@ def attach_membership_and_eligibility(build: DailyPanelBuild, membership: pd.Dat
     else: daily["is_member"] = daily.symbol.eq(config.benchmark_symbol)
     daily["pit_member"] = daily.is_member.fillna(False) | daily.symbol.eq(config.benchmark_symbol)
     daily["sector_id"] = np.nan; daily["industry_id"] = np.nan
-    daily["prior_20d_median_dollar_volume"] = daily.groupby("security_id", sort=False).dollar_volume.transform(lambda x: x.rolling(20, min_periods=20).median().shift(1))
-    daily["analysis_eligible"] = daily.pit_member & daily.session_complete & daily.open.ge(config.minimum_price) & daily.close.ge(config.minimum_price) & daily.prior_20d_median_dollar_volume.ge(config.minimum_prior_20d_median_dollar_volume)
+    daily["prior_20d_median_dollar_volume"] = daily.groupby("security_id", sort=False).dollar_volume.transform(lambda x: x.rolling(20, min_periods=15).median().shift(1))
+    daily["analysis_period"] = daily.session_date.ge(pd.Timestamp(config.analysis_start)) & daily.session_date.lt(pd.Timestamp(config.sealed_holdout_start))
+    daily["analysis_eligible"] = daily.analysis_period & daily.pit_member & daily.session_complete & daily.open.ge(config.minimum_price) & daily.close.ge(config.minimum_price) & daily.prior_20d_median_dollar_volume.ge(config.minimum_prior_20d_median_dollar_volume)
+    daily["decision_eligible"] = daily["analysis_eligible"]
+    daily["is_benchmark"] = daily.symbol.eq(config.benchmark_symbol)
     daily["scan_eligible"] = daily.analysis_eligible
     daily["corporate_action_valid"] = True
     daily["available_at_ts"] = pd.to_datetime(daily.available_at_ts, utc=True)

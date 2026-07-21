@@ -9,7 +9,7 @@ class DensePanel:
 
 @dataclass
 class PrimitiveBundle:
-    close_log: np.ndarray; close_return: np.ndarray; overnight_return: np.ndarray; regular_return: np.ndarray; high: np.ndarray; low: np.ndarray; open: np.ndarray; close: np.ndarray; volume: np.ndarray; dollar_volume: np.ndarray; first_60m_return: np.ndarray; last_60m_return: np.ndarray; market_return: np.ndarray; sector_codes: np.ndarray|None; industry_codes: np.ndarray|None; session_vwap: np.ndarray|None = None; open_30m_volume: np.ndarray|None = None; close_30m_volume: np.ndarray|None = None
+    close_log: np.ndarray; close_return: np.ndarray; overnight_return: np.ndarray; regular_return: np.ndarray; high: np.ndarray; low: np.ndarray; open: np.ndarray; close: np.ndarray; volume: np.ndarray; dollar_volume: np.ndarray; first_60m_return: np.ndarray; last_60m_return: np.ndarray; market_return: np.ndarray; sector_codes: np.ndarray|None; industry_codes: np.ndarray|None; session_vwap: np.ndarray|None = None; open_30m_volume: np.ndarray|None = None; close_30m_volume: np.ndarray|None = None; first_60m_volume: np.ndarray|None = None; last_60m_volume: np.ndarray|None = None; largest_5m_volume: np.ndarray|None = None; midday: np.ndarray|None = None; market_overnight_return: np.ndarray|None = None
 
 def shift(matrix: np.ndarray, periods: int) -> np.ndarray:
     out=np.full_like(matrix,np.nan,dtype=np.float32)
@@ -47,5 +47,5 @@ def to_dense_panel(panel: pd.DataFrame, *, value_columns: list[str]) -> DensePan
     return DensePanel(sessions,securities,symbols,key,arrays,valid)
 
 def build_primitives(dense: DensePanel, benchmark_symbol="QQQ", sector_codes=None, industry_codes=None) -> PrimitiveBundle:
-    a=dense.arrays; close=a["close"]; op=a["open"]; close_log=np.log(close); close_return=np.expm1(close_log-shift(close_log,1)); overnight=op/shift(close,1)-1; regular=close/op-1; market=np.nanmean(close_return[:,np.array(dense.symbols)==benchmark_symbol],axis=1) if np.any(np.array(dense.symbols)==benchmark_symbol) else np.full(len(close),np.nan)
-    return PrimitiveBundle(close_log,close_return,overnight,regular,a["high"],a["low"],op,close,a["volume"],a["dollar_volume"],a.get("first_60m_return",np.full_like(close,np.nan)),a.get("last_60m_return",np.full_like(close,np.nan)),market,sector_codes,industry_codes,a.get("session_vwap"),a.get("open_30m_volume"),a.get("close_30m_volume"))
+    a=dense.arrays; close=a["close"]; op=a["open"]; close_log=np.log(close); close_return=np.expm1(close_log-shift(close_log,1)); overnight=op/shift(close,1)-1; regular=close/op-1; benchmark=np.array(dense.symbols)==benchmark_symbol; market=np.nanmean(close_return[:,benchmark],axis=1) if benchmark.any() else np.full(len(close),np.nan); market_overnight=np.nanmean(overnight[:,benchmark],axis=1) if benchmark.any() else np.full(len(close),np.nan)
+    return PrimitiveBundle(close_log,close_return,overnight,regular,a["high"],a["low"],op,close,a["volume"],a["dollar_volume"],a.get("first_60m_return",np.full_like(close,np.nan)),a.get("last_60m_return",np.full_like(close,np.nan)),market,sector_codes,industry_codes,a.get("session_vwap"),a.get("open_30m_volume"),a.get("close_30m_volume"),a.get("first_60m_volume"),a.get("last_60m_volume"),a.get("largest_5m_volume"),a.get("midday"),market_overnight)

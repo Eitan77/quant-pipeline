@@ -8,12 +8,14 @@ class MeanInference:
     mean:float; median:float; std:float; hac_standard_error:float; hac_t:float; pvalue:float; positive_fraction:float; n:int
 
 def newey_west_mean_inference(values,*,lag):
-    x=np.asarray(values,float); x=x[np.isfinite(x)]; n=len(x)
+    x=np.asarray(values,float); finite=np.isfinite(x); n=int(finite.sum())
     if n<max(20,lag+5): return MeanInference(np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,n)
-    mean=float(x.mean()); z=x-mean; l=min(lag,n-1); lr=float(z@z/n)
-    for k in range(1,l+1): lr += 2*(1-k/(l+1))*float(z[k:]@z[:-k]/n)
+    mean=float(x[finite].mean()); z=np.where(finite,x-mean,np.nan); l=min(lag,len(x)-1); lr=float(np.nanmean(z*z))
+    for k in range(1,l+1):
+        pair=np.isfinite(z[k:])&np.isfinite(z[:-k])
+        if pair.any(): lr += 2*(1-k/(lag+1))*float(np.mean(z[k:][pair]*z[:-k][pair]))
     se=float(np.sqrt(max(lr/n,0))); t=mean/se if se>0 else np.nan; p=float(2*norm.sf(abs(t))) if np.isfinite(t) else np.nan
-    return MeanInference(mean,float(np.median(x)),float(np.std(x,ddof=1)),se,float(t),p,float(np.mean(x>0)),n)
+    return MeanInference(mean,float(np.nanmedian(x)),float(np.nanstd(x,ddof=1)),se,float(t),p,float(np.mean(x[finite]>0)),n)
 
 def benjamini_hochberg(values):
     import pandas as pd

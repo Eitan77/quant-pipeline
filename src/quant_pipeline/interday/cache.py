@@ -42,7 +42,44 @@ def validate_interday_cache(path: Path, *, fingerprint: str, schema_version: str
     if pq.ParquetFile(path).metadata.num_rows != saved["row_count"]: raise InterdayCacheMismatch("Cache row count mismatch")
     return saved
 
-def write_matrix(path: Path, array: np.ndarray, *, names: list[str], dates: pd.DatetimeIndex, security_ids: np.ndarray, fingerprint: str, schema_version: str) -> dict:
-    path.parent.mkdir(parents=True,exist_ok=True); actual=path if path.suffix==".npy" else path.with_suffix(".npy"); np.save(actual,array,allow_pickle=False)
-    meta={"shape":list(array.shape),"dtype":str(array.dtype),"names":names,"date_hash":hashlib.sha256(pd.util.hash_pandas_object(pd.Series(dates),index=False).to_numpy().tobytes()).hexdigest(),"symbol_hash":hashlib.sha256("|".join(map(str,security_ids)).encode()).hexdigest(),"fingerprint":fingerprint,"schema_version":schema_version,"file_sha256":_digest(actual)}
-    actual.with_suffix(".json").write_text(json.dumps(meta,indent=2,default=str),encoding="utf-8"); return meta
+def write_matrix(path: Path, array: np.ndarray, *, names: list[str], dates: pd.DatetimeIndex,
+                 security_ids: np.ndarray, fingerprint: str, schema_version: str,
+                 axis_order: tuple[str, ...] = ("feature", "date", "security")) -> dict:
+    """Write a typed matrix and an integrity manifest atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    actual = path if path.suffix == ".npy" else path.with_suffix(".npy")
+    tmp = actual.with_suffix(actual.suffix + ".tmp")
+    with tmp.open("wb") as handle:
+        np.save(handle, np.asarray(array), allow_pickle=False)
+    tmp.replace(actual)
+    meta = {
+        "schema_version": schema_version, "fingerprint": fingerprint,
+        "shape": list(array.shape), "dtype": str(array.dtype),
+        "axis_order": list(axis_order), "names": list(names),
+        "date_hash": hashlib.sha256(pd.util.hash_pandas_object(pd.Series(dates), index=False).to_numpy().tobytes()).hexdigest(),
+        "security_id_hash": hashlib.sha256("|".join(map(str, security_ids)).encode()).hexdigest(),
+        "file_size": actual.stat().st_size, "file_sha256": _digest(actual),
+    }
+    manifest = actual.with_suffix(".json")
+    mtmp = manifest.with_suffix(manifest.suffix + ".tmp")
+    mtmp.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    mtmp.replace(manifest)
+    return meta
+
+def validate_matrix(path: Path, *, fingerprint: str, schema_version: str,
+                    shape: tuple[int, ...] | None = None,
+                    axis_order: tuple[str, ...] | None = None) -> dict:
+    actual = path if path.suffix == ".npy" else path.with_suffix(".npy")
+    manifest = actual.with_suffix(".json")
+    if not actual.exists() or not manifest.exists():
+        raise InterdayCacheMismatch(f"Matrix or manifest missing: {actual}")
+    saved = json.loads(manifest.read_text(encoding="utf-8"))
+    if saved.get("fingerprint") != fingerprint or saved.get("schema_version") != schema_version:
+        raise InterdayCacheMismatch(f"Matrix identity mismatch: {actual}")
+    if saved.get("file_size") != actual.stat().st_size or saved.get("file_sha256") != _digest(actual):
+        raise InterdayCacheMismatch(f"Matrix digest mismatch: {actual}")
+    if shape is not None and tuple(saved.get("shape", ())) != tuple(shape):
+        raise InterdayCacheMismatch(f"Matrix shape mismatch: {actual}")
+    if axis_order is not None and tuple(saved.get("axis_order", ())) != tuple(axis_order):
+        raise InterdayCacheMismatch(f"Matrix axis-order mismatch: {actual}")
+    return saved

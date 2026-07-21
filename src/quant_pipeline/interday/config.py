@@ -18,8 +18,12 @@ class InterdayConfig:
     feed: str = "sip"
     adjustment: str = "raw"
     exchange_calendar: str = "XNYS"
-    start: str = "2019-06-21"
-    source_warmup_start: str | None = "2018-06-21"
+    source_start: str = "2018-01-02"
+    analysis_start: str = "2019-06-21"
+    # Backward-compatible input aliases; production code uses source_start/
+    # analysis_start explicitly.
+    start: str | None = None
+    source_warmup_start: str | None = None
     discovery_end: str = "2026-04-30"
     sealed_holdout_start: str = "2026-05-01"
     allow_holdout_access: bool = False
@@ -32,10 +36,13 @@ class InterdayConfig:
     require_sector_for_sector_scan: bool = True
     minimum_sector_members_ex_focal: int = 3
     minimum_peer_members_ex_focal: int = 3
-    corporate_actions_path: str | None = None
-    require_corporate_actions: bool = False
-    require_cash_dividends: bool = False
-    require_delisting_outcomes: bool = False
+    corporate_actions_path: str | None = "D:/AlgoResearch/Quant Pipeline/reference/corporate_actions_through_20260430.parquet"
+    require_corporate_actions: bool = True
+    require_cash_dividends: bool = True
+    require_delisting_outcomes: bool = True
+    security_id_column: str = "security_id"
+    security_master_table: str | None = None
+    require_stable_security_id: bool = True
     target_horizons_sessions: tuple[int, ...] = DEFAULT_HORIZONS
     return_windows_sessions: tuple[int, ...] = DEFAULT_RETURN_WINDOWS
     trend_windows_sessions: tuple[int, ...] = (5, 10, 20, 40)
@@ -58,6 +65,7 @@ class InterdayConfig:
     primary_fdr_threshold: float = 0.05
     pvalue_sidedness: str = "two_sided"
     pre_shortlist_q_threshold: float = 0.20
+    minimum_rank_ic_effect: float = 0.01
     minimum_neighbor_retention: float = 0.50
     minimum_positive_folds: int = 3
     maximum_top5_symbol_effect_share: float = 0.25
@@ -92,7 +100,13 @@ class InterdayConfig:
         unknown = set(raw) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"Unknown interday config keys: {sorted(unknown)}")
-        tuple_fields = {n for n, f in cls.__dataclass_fields__.items() if f.type.startswith("tuple") or n.endswith("_sessions") or n == "exact_cost_scenarios_bps_per_side"}
+        tuple_fields = {
+            "target_horizons_sessions", "return_windows_sessions",
+            "trend_windows_sessions", "location_windows_sessions",
+            "volatility_windows_sessions", "volume_windows_sessions",
+            "session_component_windows_sessions",
+            "exact_cost_scenarios_bps_per_side",
+        }
         for name in tuple_fields:
             if name in raw and isinstance(raw[name], list):
                 raw[name] = tuple(raw[name])
@@ -118,7 +132,19 @@ class InterdayConfig:
         if horizon <= 14: return self.minimum_effect_bps_h12_h14
         return self.minimum_effect_bps_h18_h20
 
+    def __post_init__(self) -> None:
+        if self.start is not None:
+            object.__setattr__(self, "analysis_start", self.start)
+        if self.source_warmup_start is not None:
+            object.__setattr__(self, "source_start", self.source_warmup_start)
+
     def validate(self) -> None:
+        source_start = pd.Timestamp(self.source_start)
+        analysis_start = pd.Timestamp(self.analysis_start)
+        if not source_start < analysis_start:
+            raise ValueError("source_start must precede analysis_start")
+        if analysis_start > pd.Timestamp(self.discovery_end):
+            raise ValueError("analysis_start must not exceed discovery_end")
         if pd.Timestamp(self.discovery_end) >= pd.Timestamp(self.sealed_holdout_start):
             raise ValueError("discovery_end must precede sealed_holdout_start")
         if self.allow_holdout_access:
@@ -128,13 +154,17 @@ class InterdayConfig:
             raise ValueError("target_horizons_sessions must be unique and sorted")
         if max(horizons) > 20 or min(horizons) < 1:
             raise ValueError("Interday 2A horizons must be in [1, 20]")
-        if self.minimum_decile_cross_section_size < 10:
-            raise ValueError("minimum_decile_cross_section_size is too small")
+        if self.minimum_decile_cross_section_size < 80:
+            raise ValueError("Decile discovery requires at least 80 eligible symbols")
         if not 0 < self.minimum_target_coverage_fraction_per_bin <= 1:
             raise ValueError("minimum_target_coverage_fraction_per_bin must be in (0, 1]")
         if not 0 < self.memory_budget_fraction < 1:
             raise ValueError("memory_budget_fraction must be in (0, 1)")
         if self.pvalue_sidedness != "two_sided":
             raise ValueError("Interday 2A uses two-sided discovery p-values")
-        if self.source_warmup_start and pd.Timestamp(self.source_warmup_start) > pd.Timestamp(self.start):
-            raise ValueError("source_warmup_start must not follow start")
+        if self.cache_value_dtype != "float32":
+            raise ValueError("Interday scan caches are specified as float32")
+        if self.statistic_accumulation_dtype != "float64":
+            raise ValueError("Statistical accumulation must use float64")
+        if self.require_corporate_actions and not self.corporate_actions_path:
+            raise ValueError("Production Interday 2A requires a corporate-action path")

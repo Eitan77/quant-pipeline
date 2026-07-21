@@ -4,8 +4,8 @@ source_table: derived_bars_5m
 feed: sip
 adjustment: raw
 exchange_calendar: XNYS
-start: '2019-06-21'
-source_warmup_start: '2018-06-21'
+source_start: '2018-01-02'
+analysis_start: '2019-06-21'
 discovery_end: '2026-04-30'
 sealed_holdout_start: '2026-05-01'
 allow_holdout_access: false
@@ -13,7 +13,11 @@ output_root: D:/AlgoResearch/Quant Pipeline/runs
 membership_table: qqq_pit_membership_daily
 require_membership: true
 benchmark_symbol: QQQ
-require_corporate_actions: false
+corporate_actions_path: D:/AlgoResearch/Quant Pipeline/reference/corporate_actions_through_20260430.parquet
+require_corporate_actions: true
+require_cash_dividends: true
+require_delisting_outcomes: true
+require_stable_security_id: true
 use_cuda: true
 memory_budget_fraction: 0.70
 resume: true

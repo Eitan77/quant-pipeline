@@ -23,12 +23,14 @@ class TradingCalendar:
         return self._calendar.sessions_in_range(start, end)
 
     def clocks(self, start: str, end: str) -> pd.DataFrame:
-        schedule = self._calendar.schedule.loc[start:end].copy().rename(columns={"open": "open_ts", "close": "close_ts"})
-        schedule["session_date"] = schedule.index.tz_localize(None).normalize()
-        local_open = schedule.open_ts.dt.tz_convert(ET)
-        local_close = schedule.close_ts.dt.tz_convert(ET)
-        schedule["shortened_session"] = (local_close - local_open) < pd.Timedelta(hours=6, minutes=30)
-        return schedule.reset_index(drop=True)
+        rows=[]
+        for session in self._calendar.sessions_in_range(start,end):
+            open_ts=pd.Timestamp(self._calendar.session_open(session)).tz_convert("UTC")
+            close_ts=pd.Timestamp(self._calendar.session_close(session)).tz_convert("UTC")
+            minutes=int((close_ts-open_ts)/pd.Timedelta(minutes=1))
+            if minutes%5: raise ValueError(f"Non-five-minute session: {session}")
+            rows.append({"session_date":pd.Timestamp(session).tz_localize(None).normalize(),"open_ts":open_ts,"close_ts":close_ts,"expected_bar_count":minutes//5,"shortened_session":minutes<390})
+        return pd.DataFrame(rows)
 
     def offset_session(self, session: pd.Timestamp, offset: int) -> pd.Timestamp:
         sessions = self._calendar.sessions
