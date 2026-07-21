@@ -1,0 +1,19 @@
+experiment_id: interday_2a_single_variable_through_20260430
+catalog_path: D:/AlgoResearch/data/catalog.duckdb
+source_table: derived_bars_5m
+feed: sip
+adjustment: raw
+exchange_calendar: XNYS
+start: '2019-06-21'
+source_warmup_start: '2018-06-21'
+discovery_end: '2026-04-30'
+sealed_holdout_start: '2026-05-01'
+allow_holdout_access: false
+output_root: D:/AlgoResearch/Quant Pipeline/runs
+membership_table: qqq_pit_membership_daily
+require_membership: true
+benchmark_symbol: QQQ
+require_corporate_actions: false
+use_cuda: true
+memory_budget_fraction: 0.70
+resume: true
