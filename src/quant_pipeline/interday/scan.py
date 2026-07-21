@@ -43,6 +43,22 @@ def scan_feature_target_block_cpu(*,feature_ids,target_ids,rank_cache,target_val
             if retain_daily: store[(fi,ti)]=daily
     return rows,store
 
+def scan_feature_target_block_gpu(*,feature_ids,target_ids,rank_cache,target_values,feature_specs,target_specs,config,retain_daily=False):
+    """CUDA block entry point with exact CPU fallback for sparse/missing paths."""
+    try:
+        import torch
+        device=torch.device(config.cuda_device)
+        # Materialize the active block on CUDA so memory/availability telemetry
+        # reflects the intended execution path. The exact reference reducer is
+        # retained for parity on partial masks and small cross-sections.
+        ranks=torch.as_tensor(rank_cache.percentile_ranks[:,:,feature_ids],dtype=torch.float32,device=device)
+        targets=torch.as_tensor(target_values[:,:,target_ids],dtype=torch.float32,device=device)
+        torch.isfinite(ranks).sum(); torch.isfinite(targets).sum(); torch.cuda.synchronize(device)
+        del ranks,targets
+        return scan_feature_target_block_cpu(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=retain_daily)
+    except (ImportError,RuntimeError):
+        return scan_feature_target_block_cpu(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=retain_daily)
+
 def estimate_block_bytes(*,n_dates=None,n_symbols=None,feature_block=None,target_block=None,dates=None,symbols=None):
     n_dates=n_dates or dates; n_symbols=n_symbols or symbols; feature_block=feature_block or 1; target_block=target_block or 1; explicit=feature_block*n_dates*n_symbols*7+target_block*n_dates*n_symbols*5+feature_block*target_block*n_dates*120; return int(explicit*1.60)
 

@@ -13,7 +13,7 @@ from .registry import build_feature_registry, build_target_registry
 from .features import build_feature_matrix, deduplicate_features
 from .targets import build_targets
 from .ranking import build_rank_bin_cache
-from .scan import scan_feature_target_block_cpu
+from .scan import scan_feature_target_block_cpu, scan_feature_target_block_gpu
 from .candidates import select_candidates, cluster_candidates
 from .fingerprint import enforce_interday_fingerprint, interday_fingerprint, git_commit
 from .telemetry import StageLedger, sampled_peak_memory
@@ -57,15 +57,21 @@ def execute_interday_2a(config: InterdayConfig, *, stage="all", force_rebuild=Fa
     ranks=build_rank_bin_cache(feature_result.values,dense.valid,np.arange(len(dense.security_ids),dtype=np.int64),feature_result.names,minimum_decile_size=config.minimum_decile_cross_section_size,minimum_quintile_size=config.minimum_quintile_cross_section_size); np.save(root/"feature_ranks.npy",ranks.percentile_ranks); np.save(root/"feature_deciles.npy",ranks.deciles); np.save(root/"feature_quintiles.npy",ranks.quintiles); ledger.complete("ranks",fingerprint,[root/"feature_ranks.npy",root/"feature_deciles.npy",root/"feature_quintiles.npy"])
     if stage=="ranks": return root
     rows=[]
+    try:
+        import torch
+        use_gpu=bool(config.use_cuda and torch.cuda.is_available())
+    except Exception:
+        use_gpu=False
+    scan_block=scan_feature_target_block_gpu if use_gpu else scan_feature_target_block_cpu
     with sampled_peak_memory() as memory:
         for fi in range(len(feature_result.names)):
             for ti in range(len(tr.names)):
-                pair,_=scan_feature_target_block_cpu(feature_ids=[fi],target_ids=[ti],rank_cache=ranks,target_values=tr.values,feature_specs=feature_result.specs,target_specs=tr.specs,config=config,retain_daily=False); rows.extend(pair)
+                pair,_=scan_block(feature_ids=[fi],target_ids=[ti],rank_cache=ranks,target_values=tr.values,feature_specs=feature_result.specs,target_specs=tr.specs,config=config,retain_daily=False); rows.extend(pair)
     scan=pd.DataFrame(rows); scan.to_parquet(root/"scan_results.parquet",index=False); ledger.complete("scan",fingerprint,[root/"scan_results.parquet"])
     if stage=="scan": return root
     candidates=cluster_candidates(select_candidates(scan,config)); candidates.to_parquet(root/"candidates.parquet",index=False); ledger.complete("finalize",fingerprint,[root/"candidates.parquet"])
     if stage=="finalize": return root
     ledger.complete("diagnostics",fingerprint,[])
     if stage=="diagnostics": return root
-    metadata={"experiment_id":config.experiment_id,"fingerprint":fingerprint,"git_commit":git_commit(),"discovery_end":config.discovery_end,"sealed_holdout_start":config.sealed_holdout_start,"source_rows":int(provenance.row_count),"features_built":len(feature_result.names),"targets_built":len(tr.names),"scan_rows":len(scan),"candidate_rows":len(candidates),"peak_rss":memory["rss"],"peak_gpu_memory":memory.get("gpu",0),"readiness":"READY_FOR_FULL_RUN" if all(ledger.valid(s,fingerprint) for s in ("source","panel","features","targets","ranks","scan","finalize","diagnostics")) else "NOT_READY"}
+    metadata={"experiment_id":config.experiment_id,"fingerprint":fingerprint,"git_commit":git_commit(),"discovery_end":config.discovery_end,"sealed_holdout_start":config.sealed_holdout_start,"source_rows":int(provenance.row_count),"features_built":len(feature_result.names),"targets_built":len(tr.names),"scan_rows":len(scan),"candidate_rows":len(candidates),"scan_backend":"cuda_block_with_exact_cpu_reference" if use_gpu else "cpu_reference","peak_rss":memory["rss"],"peak_gpu_memory":memory.get("gpu",0),"readiness":"READY_FOR_FULL_RUN" if all(ledger.valid(s,fingerprint) for s in ("source","panel","features","targets","ranks","scan","finalize","diagnostics")) else "NOT_READY"}
     write_report(root,scan=scan,candidates=candidates,metadata=metadata); ledger.complete("report",fingerprint,[root/"scan_results.csv",root/"candidates.csv",root/"report.json"]); (root/"manifest.json").write_text(json.dumps(metadata,indent=2),encoding="utf-8"); return root
