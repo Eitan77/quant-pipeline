@@ -18,6 +18,10 @@ def file_sha256(path: Path) -> str:
             digest.update(block)
     return digest.hexdigest()
 
+
+def array_sha256(values: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(values).view(np.uint8).tobytes()).hexdigest()
+
 @dataclass
 class DailyPairSeries:
     rank_ic:np.ndarray; top_minus_bottom:np.ndarray; top_minus_middle:np.ndarray; middle_minus_bottom:np.ndarray; quintile_spread:np.ndarray; target_coverage:np.ndarray; ic_cross_section_size:np.ndarray|None=None; top_coverage:np.ndarray|None=None; bottom_coverage:np.ndarray|None=None; middle_coverage:np.ndarray|None=None; quintile_top_coverage:np.ndarray|None=None; quintile_bottom_coverage:np.ndarray|None=None
@@ -87,12 +91,12 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def write_scan_part(*, path: Path, frame: pd.DataFrame, fingerprint: str, schema_version: str, feature_start: int, feature_stop: int, target_start: int, target_stop: int) -> None:
+def write_scan_part(*, path: Path, frame: pd.DataFrame, fingerprint: str, schema_version: str, feature_start: int, feature_stop: int, target_start: int, target_stop: int, backend: str = "cpu_python_reference", device_diagnostics=None, upstream_digests: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".parquet.tmp")
     frame.to_parquet(temporary, index=False)
     temporary.replace(path)
-    write_json_atomic(scan_part_manifest_path(path), {
+    manifest = {
         "fingerprint": fingerprint,
         "schema_version": schema_version,
         "feature_start": feature_start,
@@ -102,16 +106,27 @@ def write_scan_part(*, path: Path, frame: pd.DataFrame, fingerprint: str, schema
         "row_count": int(len(frame)),
         "file_size": int(path.stat().st_size),
         "file_sha256": file_sha256(path),
-    })
+        "backend": backend,
+        "device_name": getattr(device_diagnostics, "device_name", "cpu") if device_diagnostics is not None else "cpu",
+        "peak_allocated_bytes": int(getattr(device_diagnostics, "peak_allocated_bytes", 0)) if device_diagnostics is not None else 0,
+        "peak_reserved_bytes": int(getattr(device_diagnostics, "peak_reserved_bytes", 0)) if device_diagnostics is not None else 0,
+    }
+    if upstream_digests:
+        manifest.update(upstream_digests)
+    write_json_atomic(scan_part_manifest_path(path), manifest)
 
 
-def validate_scan_part(*, path: Path, fingerprint: str, schema_version: str, feature_start: int, feature_stop: int, target_start: int, target_stop: int) -> bool:
+def validate_scan_part(*, path: Path, fingerprint: str, schema_version: str, feature_start: int, feature_stop: int, target_start: int, target_stop: int, backend: str | None = None, upstream_digests: dict | None = None) -> bool:
     manifest_path = scan_part_manifest_path(path)
     if not path.exists() or not manifest_path.exists():
         return False
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     expected = {"fingerprint": fingerprint, "schema_version": schema_version, "feature_start": feature_start, "feature_stop": feature_stop, "target_start": target_start, "target_stop": target_stop}
     if any(manifest.get(key) != value for key, value in expected.items()):
+        return False
+    if backend is not None and manifest.get("backend") != backend:
+        return False
+    if upstream_digests and any(manifest.get(key) != value for key, value in upstream_digests.items()):
         return False
     if manifest.get("file_size") != path.stat().st_size or manifest.get("file_sha256") != file_sha256(path):
         return False
@@ -127,10 +142,12 @@ def run_or_resume_scan_blocks(*, root: Path, rank_cache, target_values: np.ndarr
             target_stop = min(target_start + plan.target_block_size, len(target_specs))
             path = scan_part_path(root, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop)
             part_paths.append(path)
-            if validate_scan_part(path=path, fingerprint=fingerprint, schema_version=config.scan_schema_version, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop):
+            upstream_digests = {"target_matrix_sha256": array_sha256(target_values), "rank_matrix_sha256": array_sha256(rank_cache.percentile_ranks)}
+            if validate_scan_part(path=path, fingerprint=fingerprint, schema_version=config.scan_schema_version, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop, backend="cuda_exact_cross_sectional" if config.use_cuda else "cpu_python_reference", upstream_digests=upstream_digests):
                 continue
-            rows, _ = scan_feature_target_block(feature_slice=slice(feature_start, feature_stop), target_slice=slice(target_start, target_stop), rank_cache=rank_cache, target_values=target_values, feature_specs=feature_specs, target_specs=target_specs, config=config, retain_daily=False)
-            write_scan_part(path=path, frame=pd.DataFrame(rows), fingerprint=fingerprint, schema_version=config.scan_schema_version, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop)
+            rows, retained_daily, device_diagnostics = scan_feature_target_block(feature_slice=slice(feature_start, feature_stop), target_slice=slice(target_start, target_stop), rank_cache=rank_cache, target_values=target_values, feature_specs=feature_specs, target_specs=target_specs, config=config, retain_daily=False)
+            backend = rows[0]["backend"] if rows else (device_diagnostics.backend if device_diagnostics is not None else "cpu_python_reference")
+            write_scan_part(path=path, frame=pd.DataFrame(rows), fingerprint=fingerprint, schema_version=config.scan_schema_version, feature_start=feature_start, feature_stop=feature_stop, target_start=target_start, target_stop=target_stop, backend=backend, device_diagnostics=device_diagnostics, upstream_digests=upstream_digests)
     frames = [pd.read_parquet(path) for path in part_paths]
     result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     key = ["feature", "target", "test_type"]
@@ -138,35 +155,45 @@ def run_or_resume_scan_blocks(*, root: Path, rank_cache, target_values: np.ndarr
         raise ValueError("Merged scan parts contain duplicate hypotheses")
     return result
 
-def scan_feature_target_block_gpu(*,feature_ids,target_ids,rank_cache,target_values,feature_specs,target_specs,config,retain_daily=False):
-    raise RuntimeError("CUDA backend is disabled until parity-tested reductions exist")
-
-def _cuda_daily_reductions(ranks, targets, deciles, quintiles):
-    """Actual CUDA rank/bin reductions used by the fast path."""
-    import torch
-    finite=torch.isfinite(targets)
-    for f in range(ranks.shape[0]):
-        for t in range(targets.shape[0]):
-            y=targets[t]; valid=finite[t]
-            _=torch.sum(torch.where(valid,y,torch.zeros_like(y)),dtype=torch.float64,dim=1)
-            for code in (9,0,4):
-                mask=(torch.as_tensor(deciles[f],device=targets.device)==code)&valid
-                _=torch.sum(torch.where(mask,y,torch.zeros_like(y)),dtype=torch.float64,dim=1)
-
 def scan_feature_target_block(*,feature_slice,target_slice,rank_cache,target_values,feature_specs,target_specs,config,retain_daily=False):
-    if config.use_cuda:
-        raise RuntimeError("CUDA backend is disabled until parity-tested reductions exist")
     feature_ids=list(range(feature_slice.start,feature_slice.stop)); target_ids=list(range(target_slice.start,target_slice.stop))
-    return scan_feature_target_block_cpu(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=retain_daily)
+    if config.use_cuda:
+        from .gpu_scan import scan_feature_target_block_cuda
+        return scan_feature_target_block_cuda(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=retain_daily)
+    if not config.allow_cpu_reference_smoke:
+        raise RuntimeError("CPU reference scanner is disabled for this run")
+    rows, retained = scan_feature_target_block_cpu(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=retain_daily)
+    return rows, retained, None
+
+
+def assert_gpu_parity(*, rank_cache, target_values, feature_specs, target_specs, config) -> None:
+    feature_ids=list(range(min(config.gpu_parity_feature_pairs,len(feature_specs))))
+    target_ids=list(range(min(config.gpu_parity_target_pairs,len(target_specs))))
+    cpu_rows, cpu_daily = scan_feature_target_block_cpu(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=True)
+    from .gpu_scan import scan_feature_target_block_cuda
+    gpu_rows, gpu_daily, _ = scan_feature_target_block_cuda(feature_ids=feature_ids,target_ids=target_ids,rank_cache=rank_cache,target_values=target_values,feature_specs=feature_specs,target_specs=target_specs,config=config,retain_daily=True)
+    if len(cpu_rows) != len(gpu_rows):
+        raise AssertionError("CPU/GPU parity row counts differ")
+    for key in cpu_daily:
+        left, right = cpu_daily[key], gpu_daily[key]
+        for field in ("rank_ic","top_minus_bottom","top_minus_middle","middle_minus_bottom","quintile_spread","top_coverage","bottom_coverage","middle_coverage"):
+            np.testing.assert_allclose(getattr(left,field),getattr(right,field),equal_nan=True,atol=config.gpu_parity_atol,rtol=config.gpu_parity_rtol)
 
 def estimate_block_bytes(*,dates=None,securities=None,feature_block=None,target_block=None,n_dates=None,n_symbols=None):
     dates=dates if dates is not None else n_dates; securities=securities if securities is not None else n_symbols; feature_block=feature_block or 1; target_block=target_block or 1
     feature_inputs=feature_block*dates*securities*(4+1+1+1); target_inputs=target_block*dates*securities*(4+1); daily_outputs=feature_block*target_block*dates*(10*8); temporaries=feature_block*target_block*dates*(12*8); return int((feature_inputs+target_inputs+daily_outputs+temporaries)*1.60)
 
+
+def estimate_gpu_block_bytes(*, dates: int, securities: int, target_block: int) -> int:
+    target=target_block*dates*securities*4; pair_mask=target_block*dates*securities; rank_values=2*target_block*dates*securities*8; sort_order=2*target_block*dates*securities*8; group_workspace=4*target_block*dates*securities*8; daily_outputs=14*target_block*dates*8; feature_inputs=dates*securities*(4+1+1)
+    return int(1.35*(target+pair_mask+rank_values+sort_order+group_workspace+daily_outputs+feature_inputs))
+
 def choose_block_plan(*,n_dates,n_symbols,n_features,n_targets,config,available_bytes):
-    budget=int(available_bytes*config.memory_budget_fraction); fs=[config.feature_block_size] if config.feature_block_size else [32,24,16,12,8,4]; ts=[config.target_block_size] if config.target_block_size else [16,12,8,6,4,2]
+    budget=int(available_bytes*config.memory_budget_fraction)
+    fs=[config.gpu_feature_block_size or config.feature_block_size] if (config.use_cuda and (config.gpu_feature_block_size or config.feature_block_size)) else ([config.feature_block_size] if config.feature_block_size else [32,24,16,12,8,4])
+    ts=[config.gpu_target_block_size or config.target_block_size] if (config.use_cuda and (config.gpu_target_block_size or config.target_block_size)) else ([config.target_block_size] if config.target_block_size else [16,12,8,6,4,2])
     for f in fs:
         for t in ts:
-            e=estimate_block_bytes(n_dates=n_dates,n_symbols=n_symbols,feature_block=min(f,n_features),target_block=min(t,n_targets))
+            e=estimate_gpu_block_bytes(dates=n_dates,securities=n_symbols,target_block=min(t,n_targets)) if config.use_cuda else estimate_block_bytes(n_dates=n_dates,n_symbols=n_symbols,feature_block=min(f,n_features),target_block=min(t,n_targets))
             if e<=budget:return BlockPlan(min(f,n_features),min(t,n_targets),e,config.cuda_device if config.use_cuda else "cpu")
     raise MemoryError("No safe interday scan block fits configured memory budget")

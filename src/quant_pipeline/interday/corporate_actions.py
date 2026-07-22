@@ -236,11 +236,6 @@ def interval_total_return(
     """
     entry_price and exit_price: [date, security]
     entry_date_ids and exit_date_ids: [date], -1 invalid
-
-    Returns:
-        total_return [date, security]
-        price_return [date, security]
-        unresolved_terminal [date, security]
     """
     if entry_price.ndim != 2 or exit_price.ndim != 2:
         raise ValueError(
@@ -253,26 +248,9 @@ def interval_total_return(
             f"{entry_price.shape} != {exit_price.shape}"
         )
 
-    expected_security_count = entry_price.shape[1]
-
-    action_arrays = {
-        "split_index": action_index.split_index,
-        "dividend_index": action_index.dividend_index,
-        "terminal_cash": action_index.terminal_cash,
-        "terminal_status": action_index.terminal_status,
-        "action_valid": action_index.action_valid,
-    }
-
-    for name, array in action_arrays.items():
-        if array.ndim != 2:
-            raise ValueError(f"{name} must be two-dimensional")
-        if array.shape[1] != expected_security_count:
-            raise ValueError(
-                f"{name} has {array.shape[1]} securities but prices have "
-                f"{expected_security_count}"
-            )
-
     dates, securities = entry_price.shape
+    if action_index.split_index.shape != (len(action_index.sessions), securities):
+        raise ValueError("Corporate-action index shape does not match prices")
 
     total_return = np.full(
         (dates, securities),
@@ -286,98 +264,41 @@ def interval_total_return(
         entry_date = int(entry_date_ids[decision_date])
         exit_date = int(exit_date_ids[decision_date])
 
-        if entry_date < 0 or exit_date < 0:
+        if entry_date < 0 or exit_date < 0 or exit_date < entry_date or exit_date >= len(action_index.sessions):
             continue
-
-        entry = entry_price[decision_date]
-        exit_ = exit_price[decision_date]
-
-        entry_split = action_index.split_index[entry_date]
-        exit_split = action_index.split_index[exit_date]
-        entry_dividend = action_index.dividend_index[entry_date]
-        exit_dividend = action_index.dividend_index[exit_date]
-
-        valid = (
-            np.isfinite(entry)
-            & np.isfinite(exit_)
-            & (entry > 0)
-            & (exit_ > 0)
-            & (entry_split > 0)
-        )
-
-        shares = np.full(securities, np.nan, dtype=np.float64)
-        dividends = np.full(securities, np.nan, dtype=np.float64)
-
-        shares[valid] = (
-            exit_split[valid] / entry_split[valid]
-        )
-        dividends[valid] = (
-            (exit_dividend[valid] - entry_dividend[valid])
-            / entry_split[valid]
-        )
-
-        terminal_value = shares * exit_ + dividends
-
-        # First terminal event in (entry_date, exit_date].
-        terminal_slice = action_index.terminal_cash[
-            entry_date + 1 : exit_date + 1
-        ]
-        status_slice = action_index.terminal_status[
-            entry_date + 1 : exit_date + 1
-        ]
-
-        if len(terminal_slice):
-            for security in range(securities):
-                terminal_events = np.flatnonzero(
-                    np.isfinite(terminal_slice[:, security])
-
-                )
-                unresolved_events = np.flatnonzero(
-                    status_slice[:, security]
-                    == ActionStatus.UNRESOLVED_TERMINAL_VALUE
-                )
-
-                if len(unresolved_events) and (
-                    not len(terminal_events)
-                    or unresolved_events[0] <= terminal_events[0]
-                ):
-                    unresolved[decision_date, security] = True
-                    valid[security] = False
-                    continue
-
-                if len(terminal_events):
-                    event_offset = int(terminal_events[0])
-                    event_date = entry_date + 1 + event_offset
-                    split_at_event = action_index.split_index[
-                        event_date, security
-                    ]
-                    shares_at_event = (
-                        split_at_event / entry_split[security]
-                    )
-                    cash = terminal_slice[
-                        event_offset, security
-                    ] * shares_at_event
-                    dividends_to_event = (
-                        action_index.dividend_index[
-                            event_date, security
-                        ] - entry_dividend[security]
-                    ) / entry_split[security]
-                    terminal_value[security] = (
-                        cash + dividends_to_event
-                    )
-
-        price_return_row = np.full(securities, np.nan, dtype=np.float64)
-        price_return_row[valid] = (
-            shares[valid] * exit_[valid] / entry[valid] - 1.0
-        )
-
-        total_return_row = np.full(securities, np.nan, dtype=np.float64)
-        total_return_row[valid] = (
-            terminal_value[valid] / entry[valid] - 1.0
-        )
-
-        price_return[decision_date] = price_return_row.astype(np.float32)
-        total_return[decision_date] = total_return_row.astype(np.float32)
+        entry = entry_price[decision_date].astype(np.float64, copy=False)
+        exit_ = exit_price[decision_date].astype(np.float64, copy=False)
+        interval_valid = action_index.action_valid[entry_date] & action_index.action_valid[exit_date]
+        unresolved[decision_date, ~interval_valid] = True
+        valid_entry = interval_valid & np.isfinite(entry) & (entry > 0)
+        entry_split = action_index.split_index[entry_date].astype(np.float64)
+        entry_dividend = action_index.dividend_index[entry_date].astype(np.float64)
+        for security in np.flatnonzero(valid_entry):
+            terminal_cash_slice = action_index.terminal_cash[entry_date + 1 : exit_date + 1, security]
+            terminal_status_slice = action_index.terminal_status[entry_date + 1 : exit_date + 1, security]
+            unresolved_offsets = np.flatnonzero(terminal_status_slice == ActionStatus.UNRESOLVED_TERMINAL_VALUE)
+            terminal_offsets = np.flatnonzero(np.isfinite(terminal_cash_slice))
+            first_unresolved = int(unresolved_offsets[0]) if len(unresolved_offsets) else None
+            first_terminal = int(terminal_offsets[0]) if len(terminal_offsets) else None
+            if first_unresolved is not None and (first_terminal is None or first_unresolved <= first_terminal):
+                unresolved[decision_date, security] = True
+                continue
+            if first_terminal is not None:
+                event_date = entry_date + 1 + first_terminal
+                shares_at_event = float(action_index.split_index[event_date, security]) / float(entry_split[security])
+                dividends_to_event = (float(action_index.dividend_index[event_date, security]) - float(entry_dividend[security])) / float(entry_split[security])
+                terminal_value = float(terminal_cash_slice[first_terminal]) * shares_at_event + dividends_to_event
+                total_return[decision_date, security] = terminal_value / entry[security] - 1.0
+                continue
+            if not np.isfinite(exit_[security]) or exit_[security] <= 0:
+                continue
+            exit_split = float(action_index.split_index[exit_date, security])
+            exit_dividend = float(action_index.dividend_index[exit_date, security])
+            shares = exit_split / float(entry_split[security])
+            dividends = (exit_dividend - float(entry_dividend[security])) / float(entry_split[security])
+            terminal_value = shares * exit_[security] + dividends
+            price_return[decision_date, security] = shares * exit_[security] / entry[security] - 1.0
+            total_return[decision_date, security] = terminal_value / entry[security] - 1.0
 
     return total_return, price_return, unresolved
 

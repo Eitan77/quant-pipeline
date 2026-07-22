@@ -20,7 +20,9 @@ require_delisting_outcomes: true
 require_stable_security_id: true
 membership_security_id_column: security_id
 benchmark_security_id: null
-use_cuda: false
+use_cuda: true
+require_cuda_for_full_scan: true
+allow_cpu_reference_smoke: true
 memory_budget_fraction: 0.70
 resume: true
 panel_schema_version: interday_daily_v2

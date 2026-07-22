@@ -97,11 +97,11 @@ def rolling_days_since_extreme(values: np.ndarray, window: int, use_maximum: boo
     return rolling_days_since(values, window, maximum=use_maximum)
 
 def _window_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpec], config: InterdayConfig) -> dict[str,np.ndarray]:
-    out={}; close=primitives.close; log=primitives.close_log; ret=primitives.close_return; names={s.name for s in specs}; windows=sorted({s.lookback_sessions for s in specs if s.lookback_sessions})
+    out={}; close=primitives.close; log=primitives.daily_log_total_return; ret=primitives.daily_total_return; names={s.name for s in specs}; windows=sorted({s.lookback_sessions for s in specs if s.lookback_sessions})
     for n in windows:
-        if f"return_{n}" in names: out[f"return_{n}"]=np.expm1(log-shift(log,n)).astype(np.float32)
-        if f"return_skip1_{n}" in names: out[f"return_skip1_{n}"]=np.expm1(shift(log,1)-shift(log,n+1)).astype(np.float32)
-        if f"return_vol_scaled_{n}" in names: out[f"return_vol_scaled_{n}"]=safe_divide(np.expm1(log-shift(log,n)),shift(rolling_std(ret,20,15),1))
+        if f"return_{n}" in names: out[f"return_{n}"]=np.expm1(rolling_sum_2d(log,n,minimum_observations=n)).astype(np.float32)
+        if f"return_skip1_{n}" in names: out[f"return_skip1_{n}"]=np.expm1(rolling_sum_2d(shift_2d(log,1),n,minimum_observations=n)).astype(np.float32)
+        if f"return_vol_scaled_{n}" in names: out[f"return_vol_scaled_{n}"]=safe_divide(np.expm1(rolling_sum_2d(log,n,minimum_observations=n)),shift(rolling_std(ret,20,15),1))
         if f"positive_day_fraction_{n}" in names: out[f"positive_day_fraction_{n}"]=rolling_mean(np.where(np.isfinite(ret), (ret>0).astype(np.float32), np.nan),n,n)
         if f"cumulative_overnight_return_{n}" in names: out[f"cumulative_overnight_return_{n}"]=np.expm1(rolling_sum(np.log1p(primitives.overnight_return),n,n)).astype(np.float32)
         if f"cumulative_regular_session_return_{n}" in names: out[f"cumulative_regular_session_return_{n}"]=np.expm1(rolling_sum(np.log1p(primitives.regular_return),n,n)).astype(np.float32)
@@ -133,8 +133,8 @@ def _window_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpe
         if f"volume_zscore_{n}" in names: out[f"volume_zscore_{n}"]=safe_divide(primitives.volume-shift(rolling_mean(primitives.volume,n,n),1),shift(rolling_std(primitives.volume,n,n),1))
         if f"dollar_volume_zscore_{n}" in names: out[f"dollar_volume_zscore_{n}"]=safe_divide(primitives.dollar_volume-shift(rolling_mean(primitives.dollar_volume,n,n),1),shift(rolling_std(primitives.dollar_volume,n,n),1))
         if f"median_dollar_volume_{n}" in names: out[f"median_dollar_volume_{n}"]=rolling_median(primitives.dollar_volume,n,max(3,int(0.75*n)))
-    stock_log_return = primitives.total_return_log_index - shift_2d(primitives.total_return_log_index, 1)
-    market_log_return = primitives.benchmark_total_return_log_index - shift_1d(primitives.benchmark_total_return_log_index, 1)
+    stock_log_return = primitives.daily_log_total_return
+    market_log_return = primitives.benchmark_daily_log_total_return
     beta=rolling_beta_prior_only(stock_log_return,market_log_return,window=config.beta_primary_window_sessions,minimum_observations=config.beta_minimum_observations)
     residual_log=stock_log_return-beta*market_log_return[:,None]
     for s in specs:
@@ -142,7 +142,7 @@ def _window_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpe
             n=int(s.lookback_sessions); out[s.name]=np.expm1(rolling_sum(residual_log,n,n)).astype(np.float32)
         if s.name.startswith("sector_residual_return_") and primitives.sector_codes is not None:
             n=int(s.lookback_sessions)
-            raw=np.expm1(primitives.total_return_log_index-shift_2d(primitives.total_return_log_index,n)).astype(np.float32)
+            raw=rolling_sum_2d(primitives.daily_log_total_return,n,minimum_observations=n).astype(np.float32)
             group=leave_one_out_group_mean(raw,primitives.sector_codes,np.isfinite(raw),config.minimum_sector_members_ex_focal)
             out[s.name]=(raw-group).astype(np.float32)
     return out
@@ -157,7 +157,7 @@ def leave_one_out_group_mean(values, group_codes, valid, minimum_others):
 
 def _current_features(primitives,specs):
     out={}; close,op=primitives.close,primitives.open; prev_close=shift(close,1); gap=op/prev_close-1; daily_range=(primitives.high-primitives.low)/close
-    direct={"opening_gap":gap,"first_60m_return":primitives.first_60m_return,"last_60m_return":primitives.last_60m_return,"daily_range_pct":daily_range,"distance_close_from_session_vwap":safe_divide(close,primitives.split_adjusted_session_vwap)-1,"open_to_midday_return":safe_divide(primitives.split_adjusted_1200,primitives.split_adjusted_open5)-1,"midday_to_close_return":safe_divide(primitives.split_adjusted_close5,primitives.split_adjusted_1200)-1,"close_location_in_daily_range":safe_divide(close-primitives.low,primitives.high-primitives.low),"opening_relative_volume_60m":safe_divide(primitives.first_60m_volume,shift(rolling_mean(primitives.first_60m_volume,20,15),1)),"open_30m_volume_share":safe_divide(primitives.first_60m_volume,primitives.volume),"close_30m_volume_share":safe_divide(primitives.last_60m_volume,primitives.volume),"last_hour_volume_share":safe_divide(primitives.last_60m_volume,primitives.volume),"largest_5m_volume_share":safe_divide(primitives.largest_5m_volume,primitives.volume)}
+    direct={"opening_gap":gap,"first_60m_return":primitives.first_60m_return,"last_60m_return":primitives.last_60m_return,"daily_range_pct":daily_range,"distance_close_from_session_vwap":safe_divide(close,primitives.split_adjusted_session_vwap)-1,"open_to_midday_return":safe_divide(primitives.split_adjusted_1200,primitives.split_adjusted_open5)-1,"midday_to_close_return":safe_divide(primitives.split_adjusted_close5,primitives.split_adjusted_1200)-1,"close_location_in_daily_range":safe_divide(close-primitives.low,primitives.high-primitives.low),"opening_relative_volume_60m":safe_divide(primitives.first_60m_volume,shift(rolling_mean(primitives.first_60m_volume,20,15),1)),"open_30m_volume_share":safe_divide(primitives.open_30m_volume,primitives.volume),"close_30m_volume_share":safe_divide(primitives.close_30m_volume,primitives.volume),"last_hour_volume_share":safe_divide(primitives.last_60m_volume,primitives.volume),"largest_5m_volume_share":safe_divide(primitives.largest_5m_volume,primitives.volume)}
     for s in specs:
         if s.name in direct: out[s.name]=direct[s.name]
         elif s.name.startswith("gap_fill_fraction_"):
@@ -176,11 +176,28 @@ def gap_fill_fraction(prior_close: np.ndarray, open5: np.ndarray, checkpoint: np
     output[valid] = (np.sign(-gap[valid]) * movement[valid] / np.abs(gap[valid])).astype(np.float32)
     return output
 
+
+def consecutive_direction_count(returns: np.ndarray, *, positive: bool) -> np.ndarray:
+    dates, securities = returns.shape
+    output = np.full((dates, securities), np.nan, dtype=np.float32)
+    for security in range(securities):
+        count = 0
+        for date in range(dates):
+            value = returns[date, security]
+            if not np.isfinite(value):
+                count = 0
+                output[date, security] = np.nan
+                continue
+            condition = value > 0 if positive else value < 0
+            count = count + 1 if condition else 0
+            output[date, security] = count
+    return output
+
 def _fallback_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureSpec], config: InterdayConfig):
     """Small family fallbacks for registry members whose inputs are optional."""
-    out={}; ret=primitives.close_return
-    stock_log_return = primitives.total_return_log_index - shift_2d(primitives.total_return_log_index, 1)
-    market_log_return = primitives.benchmark_total_return_log_index - shift_1d(primitives.benchmark_total_return_log_index, 1)
+    out={}; ret=primitives.daily_total_return
+    stock_log_return = primitives.daily_log_total_return
+    market_log_return = primitives.benchmark_daily_log_total_return
     beta=rolling_beta_prior_only(stock_log_return,market_log_return,window=config.beta_primary_window_sessions,minimum_observations=config.beta_minimum_observations)
     residual=stock_log_return-beta*market_log_return[:,None]
     prior_vol=shift(rolling_std(ret,20,15),1); gap=primitives.open/shift(primitives.close,1)-1; prior_dv=shift(rolling_mean(primitives.dollar_volume,20,20),1)
@@ -199,14 +216,19 @@ def _fallback_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureS
             direction = ret > 0 if n.startswith("up_") else ret < 0
             numerator=np.where(valid_return_volume&direction,primitives.volume,0.0)
             out[n]=safe_divide(rolling_sum(numerator,w,w),rolling_sum(valid_volume,w,w))
-        elif n in {"market_residual_shock_vs_prior20_vol","sector_residual_shock_vs_prior20_vol"}: out[n]=safe_divide(residual,prior_vol)
+        elif n=="market_residual_shock_vs_prior20_vol": out[n]=safe_divide(residual,prior_vol)
+        elif n=="sector_residual_shock_vs_prior20_vol" and primitives.sector_codes is not None:
+            sector_daily_mean=leave_one_out_group_mean(primitives.daily_log_total_return,primitives.sector_codes,np.isfinite(primitives.daily_log_total_return),config.minimum_sector_members_ex_focal)
+            sector_daily_residual=primitives.daily_log_total_return-sector_daily_mean
+            out[n]=safe_divide(sector_daily_residual,shift_2d(rolling_std_2d(sector_daily_residual,20,minimum_observations=15),1))
         elif n=="daily_range_shock_vs_prior20": out[n]=safe_divide((primitives.high-primitives.low)/primitives.close,shift(rolling_mean((primitives.high-primitives.low)/primitives.close,20,15),1))
         elif n=="gap_shock_vs_prior20": out[n]=safe_divide(gap,shift(rolling_std(gap,20,15),1))
         elif n=="beta_adjusted_gap":
             market_gap = primitives.market_overnight_return if primitives.market_overnight_return is not None else np.full(gap.shape[0], np.nan)
             out[n]=np.log1p(gap)-beta*np.log1p(np.asarray(market_gap)[:,None])
         elif n=="sector_adjusted_gap" and primitives.sector_codes is not None:
-            group=leave_one_out_group_mean(gap,primitives.sector_codes,np.isfinite(gap),config.minimum_sector_members_ex_focal); out[n]=gap-group
+            stock_gap_log=np.where(np.isfinite(primitives.overnight_total_return)&(primitives.overnight_total_return>-1.0),np.log1p(primitives.overnight_total_return),np.nan)
+            group=leave_one_out_group_mean(stock_gap_log,primitives.sector_codes,np.isfinite(stock_gap_log),config.minimum_sector_members_ex_focal); out[n]=(stock_gap_log-group).astype(np.float32)
         elif n=="last_hour_volume_share": out[n]=safe_divide(primitives.last_60m_volume,primitives.volume) if primitives.last_60m_volume is not None else np.full(ret.shape,np.nan,np.float32)
         elif n=="largest_5m_volume_share": out[n]=safe_divide(primitives.largest_5m_volume,primitives.volume) if primitives.largest_5m_volume is not None else np.full(ret.shape,np.nan,np.float32)
         elif n.startswith("cumulative_first_60m_return_"):
@@ -225,9 +247,7 @@ def _fallback_features(primitives: PrimitiveBundle, specs: list[InterdayFeatureS
         elif n in {"market_correlation_60","market_correlation_120"}: out[n]=safe_divide(rolling_mean(ret*primitives.market_return[:,None],int(n.rsplit("_",1)[1]),20)-rolling_mean(ret,int(n.rsplit("_",1)[1]),20)*rolling_mean(primitives.market_return[:,None],int(n.rsplit("_",1)[1]),20),rolling_std(ret,int(n.rsplit("_",1)[1]),20)*rolling_std(primitives.market_return[:,None],int(n.rsplit("_",1)[1]),20))
         elif n=="downside_beta_120": out[n]=rolling_beta_prior_only(stock_log_return,market_log_return,window=120,minimum_observations=60,market_condition=np.isfinite(market_log_return)&(market_log_return<0))
         elif n=="consecutive_up_days" or n=="consecutive_down_days":
-            sign=ret>0 if n.startswith("consecutive_up") else ret<0; arr=np.zeros_like(ret,np.float32)
-            for i in range(1,len(ret)): arr[i]=np.where(sign[i],arr[i-1]+1,0)
-            out[n]=arr
+            out[n]=consecutive_direction_count(ret,positive=n.startswith("consecutive_up"))
         elif n.startswith("days_since_"):
             w=20 if "20d" in n else 60; high="_high" in n; out[n]=rolling_days_since(primitives.close,w,maximum=high)
         elif n.startswith("context_") or n.startswith("market_") or n in {"cross_sectional_return_dispersion","average_pairwise_correlation_20","market_breadth_positive","market_breadth_above_sma20","market_drawdown_20","market_drawdown_60","market_realized_vol_20"}:
@@ -243,6 +263,14 @@ def build_feature_matrix(primitives: PrimitiveBundle, registry: list[InterdayFea
     names=sorted(built); values=np.stack([built[n] for n in names],axis=0) if names else np.empty((0,primitives.close.shape[0],primitives.close.shape[1]),np.float32)
     missing=[r for r in records if r["status"] not in {"built","unavailable"}]
     if missing: raise ValueError(f"Requested feature build failures: {missing}")
+    requested={s.name for s in registry if s.status=="requested" and s.scan_role=="cross_sectional_scan"}
+    built=set(names)
+    if requested != built:
+        raise RuntimeError(f"Feature build mismatch. Missing={sorted(requested-built)}; unexpected={sorted(built-requested)}")
+    for index, name in enumerate(names):
+        value = values[index]
+        if not any(np.isfinite(value[d]).sum() >= 2 and len(np.unique(value[d][np.isfinite(value[d])])) >= 2 for d in range(value.shape[0])):
+            raise RuntimeError(f"Feature {name} has no analysis date with two distinct finite values")
     specs={s.name:s for s in registry}; return FeatureBuildResult(names,values,np.isfinite(values),[specs[n] for n in names],records)
 
 def build_context_matrix(primitives: PrimitiveBundle, registry: list[InterdayFeatureSpec], config: InterdayConfig) -> pd.DataFrame:

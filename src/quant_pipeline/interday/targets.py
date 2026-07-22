@@ -69,8 +69,12 @@ def build_targets(*, checkpoint_arrays: dict[str,np.ndarray], benchmark_checkpoi
     for spec in target_registry:
         total,price,unresolved,market,market_unresolved,e_id,x_id,entry,exit_,be,bx=_target_arrays(checkpoint_arrays,benchmark_checkpoint_arrays,spec,action_index,benchmark_action_index,sessions)
         if spec.return_basis=="sector":
-            target=decision_date_sector_excess(total,sector_codes,decision_eligible,spec.minimum_basket_members)
-        else: target=total.copy()
+            sector_residual=decision_date_sector_excess(total,sector_codes,decision_eligible,spec.minimum_basket_members)
+            sector_mean=total-sector_residual
+            target=sector_residual
+        else:
+            sector_mean=np.zeros_like(total)
+            target=total.copy()
         reason=np.zeros((dates,security_count),np.int8)
         before_analysis=decision_session_values < analysis_start
         entry_crosses_holdout=np.zeros(dates,dtype=bool)
@@ -79,17 +83,26 @@ def build_targets(*, checkpoint_arrays: dict[str,np.ndarray], benchmark_checkpoi
         entry_crosses_holdout[valid_entry]=decision_session_values[e_id[valid_entry]]>=holdout_start
         exit_crosses_holdout[valid_exit]=decision_session_values[x_id[valid_exit]]>=holdout_start
         crosses_holdout=entry_crosses_holdout|exit_crosses_holdout
+        terminal_outcome_available=np.zeros((dates,security_count),dtype=bool)
+        for decision_date in range(dates):
+            if e_id[decision_date] >= 0 and x_id[decision_date] > e_id[decision_date]:
+                terminal_outcome_available[decision_date]=np.isfinite(action_index.terminal_cash[e_id[decision_date]+1:x_id[decision_date]+1]).any(axis=0)
         assign_reason(reason,np.broadcast_to(before_analysis[:,None],reason.shape),TargetMissingReason.BEFORE_ANALYSIS_START)
-        assign_reason(reason,~decision_eligible,TargetMissingReason.NOT_DECISION_ELIGIBLE)
-        assign_reason(reason,~np.isfinite(entry),TargetMissingReason.MISSING_ENTRY)
-        assign_reason(reason,~np.isfinite(exit_),TargetMissingReason.MISSING_EXIT)
         assign_reason(reason,np.broadcast_to(crosses_holdout[:,None],reason.shape),TargetMissingReason.CROSSES_HOLDOUT)
+        assign_reason(reason,~decision_eligible,TargetMissingReason.NOT_DECISION_ELIGIBLE)
         assign_reason(reason,unresolved,TargetMissingReason.UNRESOLVED_CORPORATE_ACTION)
         if spec.return_basis=="sector": assign_reason(reason,np.isfinite(total)&~np.isfinite(target),TargetMissingReason.INSUFFICIENT_SECTOR_BASKET)
+        assign_reason(reason,~np.isfinite(entry),TargetMissingReason.MISSING_ENTRY)
+        assign_reason(reason,~np.isfinite(exit_)&~terminal_outcome_available,TargetMissingReason.MISSING_EXIT)
         benchmark_missing=~np.isfinite(market)
         assign_reason(reason,np.broadcast_to(benchmark_missing[:,None],reason.shape),TargetMissingReason.BENCHMARK_MISSING)
         assign_reason(reason,np.broadcast_to(market_unresolved[:,None],reason.shape),TargetMissingReason.UNRESOLVED_CORPORATE_ACTION)
-        target[reason!=TargetMissingReason.NONE]=np.nan; price[reason!=TargetMissingReason.NONE]=np.nan; log=np.log1p(target)
+        target[reason!=TargetMissingReason.NONE]=np.nan; price[reason!=TargetMissingReason.NONE]=np.nan
+        if spec.return_basis=="sector":
+            log=np.where((total>-1.0)&(sector_mean>-1.0),np.log1p(total)-np.log1p(sector_mean),np.nan)
+        else:
+            log=np.where(total>-1.0,np.log1p(total),np.nan)
+        log[reason!=TargetMissingReason.NONE]=np.nan
         values.append(target.astype(np.float32)); prices.append(price.astype(np.float32)); logs.append(log.astype(np.float32)); markets.append(market.astype(np.float32)); reasons.append(reason); entry_ids.append(e_id); exit_ids.append(x_id); specs.append(spec); records.append({"target":spec.name,"status":"built","reason":""})
     return TargetBuildResult([x.name for x in specs],np.stack(values,axis=0),np.stack(prices,axis=0),np.stack(logs,axis=0),np.isfinite(np.stack(values,axis=0)),np.stack(markets,axis=0),np.stack(reasons,axis=0),np.stack(entry_ids,axis=0),np.stack(exit_ids,axis=0),specs,records)
 

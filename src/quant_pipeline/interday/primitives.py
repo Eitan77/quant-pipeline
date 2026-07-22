@@ -51,12 +51,14 @@ class PrimitiveBundle:
     raw_close5: np.ndarray
 
     daily_total_return: np.ndarray
+    daily_log_total_return: np.ndarray
     total_return_index: np.ndarray
     total_return_log_index: np.ndarray
     overnight_total_return: np.ndarray
     regular_session_return: np.ndarray
 
     benchmark_daily_total_return: np.ndarray
+    benchmark_daily_log_total_return: np.ndarray
     benchmark_total_return_index: np.ndarray
     benchmark_total_return_log_index: np.ndarray
     benchmark_overnight_total_return: np.ndarray
@@ -65,6 +67,8 @@ class PrimitiveBundle:
     dollar_volume: np.ndarray
     first_60m_volume: np.ndarray
     last_60m_volume: np.ndarray
+    open_30m_volume: np.ndarray
+    close_30m_volume: np.ndarray
     largest_5m_volume: np.ndarray
 
     first_60m_return: np.ndarray
@@ -136,14 +140,6 @@ class PrimitiveBundle:
     @property
     def midday(self) -> np.ndarray:
         return self.split_adjusted_1200
-
-    @property
-    def open_30m_volume(self) -> np.ndarray:
-        return self.first_60m_volume
-
-    @property
-    def close_30m_volume(self) -> np.ndarray:
-        return self.last_60m_volume
 
 
 def shift_2d(values: np.ndarray, periods: int) -> np.ndarray:
@@ -392,10 +388,17 @@ def build_primitives(
         overnight = adjusted_prices.overnight_total_return
         regular = adjusted_prices.regular_session_return
 
+    daily_log_total_return = np.where(
+        np.isfinite(daily_total_return) & (daily_total_return > -1.0),
+        np.log1p(daily_total_return),
+        np.nan,
+    ).astype(np.float32)
+
     benchmark_index = resolve_benchmark_index(
         dense.security_ids, dense.symbols, benchmark_symbol
     )
     benchmark_daily = daily_total_return[:, benchmark_index]
+    benchmark_daily_log = daily_log_total_return[:, benchmark_index]
     benchmark_index_values = total_return_index[:, benchmark_index]
     benchmark_log_index = np.log(benchmark_index_values).astype(np.float32)
     benchmark_overnight = overnight[:, benchmark_index]
@@ -428,11 +431,13 @@ def build_primitives(
         raw_close15=raw_checkpoint["close15"],
         raw_close5=raw_checkpoint["close5"],
         daily_total_return=daily_total_return,
+        daily_log_total_return=daily_log_total_return,
         total_return_index=total_return_index,
         total_return_log_index=np.log(total_return_index).astype(np.float32),
         overnight_total_return=overnight,
         regular_session_return=regular,
         benchmark_daily_total_return=benchmark_daily,
+        benchmark_daily_log_total_return=benchmark_daily_log,
         benchmark_total_return_index=benchmark_index_values,
         benchmark_total_return_log_index=benchmark_log_index,
         benchmark_overnight_total_return=benchmark_overnight,
@@ -440,6 +445,8 @@ def build_primitives(
         dollar_volume=dense.arrays["dollar_volume"],
         first_60m_volume=dense.arrays["first_60m_volume"],
         last_60m_volume=dense.arrays["last_60m_volume"],
+        open_30m_volume=dense.arrays["open_30m_volume"],
+        close_30m_volume=dense.arrays["close_30m_volume"],
         largest_5m_volume=dense.arrays["largest_5m_volume"],
         first_60m_return=(
             adjusted_checkpoint["10:30"] / adjusted_checkpoint["open5"] - 1.0

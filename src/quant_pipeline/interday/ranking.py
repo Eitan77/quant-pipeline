@@ -1,6 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+import hashlib
 from scipy.stats import rankdata, spearmanr
 from .models import RankBinCache
 
@@ -12,10 +13,19 @@ def row_information(values, valid):
 def deterministic_bins(values, security_ids, bins):
     output=np.full(len(values),-1,np.int8); valid=np.isfinite(values); indices=np.flatnonzero(valid)
     if len(indices)<bins: return output
-    order=np.lexsort((np.asarray(security_ids,dtype=np.int64)[indices],values[indices])); ordered=indices[order]; base,remainder=divmod(len(ordered),bins); start=0
+    tie_key=deterministic_security_keys(security_ids)
+    order=np.lexsort((tie_key[indices],values[indices])); ordered=indices[order]; base,remainder=divmod(len(ordered),bins); start=0
     for bin_id in range(bins):
         width=base+int(bin_id<remainder); output[ordered[start:start+width]]=bin_id; start+=width
     return output
+
+
+def deterministic_security_keys(security_ids: np.ndarray) -> np.ndarray:
+    raw=np.asarray(security_ids)
+    if np.issubdtype(raw.dtype, np.integer):
+        return raw.astype(np.uint64, copy=False)
+    values=raw.astype(str)
+    return np.asarray([int.from_bytes(hashlib.sha256(value.encode()).digest()[:8],byteorder="big",signed=False) for value in values],dtype=np.uint64)
 
 def equal_weight_tail(bins,tail_bin):
     membership=bins==tail_bin; count=membership.sum(axis=1,keepdims=True); weights=np.zeros(membership.shape,dtype=np.float64); valid_dates=count[:,0]>0; weights[valid_dates]=membership[valid_dates]/count[valid_dates]; return weights

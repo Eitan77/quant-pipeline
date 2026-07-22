@@ -51,9 +51,6 @@ def apply_interday_fdr(results: pd.DataFrame) -> pd.DataFrame:
     output["feature_family_fdr"]=output.groupby(["fdr_family","feature_family"],dropna=False)["raw_p"].transform(benjamini_hochberg)
     return output
 
-def _bh_series(values):
-    p=np.asarray(values,float); order=np.argsort(p); adjusted=np.minimum.accumulate((p[order]*len(p)/np.arange(1,len(p)+1))[::-1])[::-1]; out=np.full(len(p),np.nan); out[order]=np.minimum(adjusted,1); return pd.Series(out,index=values.index)
-
 def candidate_passes(row: pd.Series, config) -> bool:
     if bool(row.get("diagnostic_only",False)) or not bool(row.get("is_executable",True)): return False
     if not np.isfinite(row.global_fdr) or row.global_fdr>config.primary_fdr_threshold: return False
@@ -68,17 +65,23 @@ def select_candidates(scan_results: pd.DataFrame, config) -> pd.DataFrame:
     if scan_results.empty:return scan_results.copy()
     result=apply_interday_fdr(scan_results)
     groups=[]
-    for keys,group in result.groupby(["feature","test_type","return_basis","target_family"],dropna=False):
-        order=["horizon_sessions"] if keys[3]!="time_of_day" else ["future_day","checkpoint"]
+    for keys,group in result.groupby(["feature","test_type","return_basis","target_family","is_executable","diagnostic_only"],dropna=False):
+        order=["horizon_sessions"] if keys[3]=="daily_terminal" else ["future_day","endpoint_order"]
         groups.append(add_local_neighbor_metrics(group,order))
-    result=pd.concat(groups,ignore_index=True) if groups else result; result["distinct_symbols"]=result["distinct_symbols"].fillna(0); result["candidate_status"]=result.apply(lambda row:"shortlisted" if candidate_passes(row,config) else "not_shortlisted",axis=1)
+    result=pd.concat(groups,ignore_index=True) if groups else result
+    result["distinct_symbols"]=result["distinct_symbols"].fillna(0)
+    result["base_candidate_pass"]=result.apply(candidate_passes,axis=1,config=config)
+    result["fold_positive_count"]=result.get("fold_positive_count",0)
+    result["last_24_month_sign_retained"]=result.get("last_24_month_sign_retained",False)
+    result["top5_symbol_effect_share"]=result.get("top5_symbol_effect_share",np.inf)
+    result["remove_top5_effect_retention"]=result.get("remove_top5_effect_retention",0.0)
+    result["passes_fold_gate"]=result["fold_positive_count"]>=config.minimum_positive_folds
+    result["passes_recent_gate"]=result["last_24_month_sign_retained"].astype(bool)
+    result["passes_concentration_gate"]=(result["top5_symbol_effect_share"]<=config.maximum_top5_symbol_effect_share)&(result["remove_top5_effect_retention"]>=config.minimum_remove_top5_effect_retention)
+    result["send_to_strategy_testing"]=result["base_candidate_pass"]&result["passes_fold_gate"]&result["passes_recent_gate"]&result["passes_concentration_gate"]&result["is_executable"].astype(bool)&~result["diagnostic_only"].astype(bool)
+    result["candidate_status"]=np.where(result["send_to_strategy_testing"],"shortlisted","not_shortlisted")
     return result.loc[result.candidate_status.eq("shortlisted")].sort_values("global_fdr")
 
-def _bh(x):
-    p=x.to_numpy(float); out=np.full(len(p),np.nan); good=np.isfinite(p)
-    if good.any():
-        q=p[good]; order=np.argsort(q); adj=np.minimum.accumulate((q[order]*len(q)/np.arange(1,len(q)+1))[::-1])[::-1]; out[np.flatnonzero(good)[order]]=np.minimum(adj,1)
-    return out
 def cluster_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
     if candidates.empty:return candidates.copy()
     out=candidates.copy()

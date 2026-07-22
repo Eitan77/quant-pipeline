@@ -127,6 +127,8 @@ class DailyPairSeries:
     middle_minus_bottom: np.ndarray
     quintile_spread: np.ndarray
 
+    target_coverage: np.ndarray
+
     ic_cross_section_size: np.ndarray
     top_coverage: np.ndarray
     bottom_coverage: np.ndarray

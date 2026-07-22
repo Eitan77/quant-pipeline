@@ -70,7 +70,11 @@ def attach_membership_and_eligibility(build: DailyPanelBuild, membership: pd.Dat
     if membership.empty and config.require_membership: raise ValueError("Required point-in-time membership is empty")
     if not membership.empty:
         if "security_id" not in membership.columns: raise ValueError("Membership must be keyed by security_id")
-        daily = daily.merge(membership[["security_id","session_date","is_member"]].drop_duplicates(["security_id","session_date"]), on=["security_id","session_date"], how="left")
+        membership_key = ["security_id", "session_date"]
+        if membership.duplicated(membership_key).any():
+            duplicate_rows = membership.loc[membership.duplicated(membership_key, keep=False), membership_key]
+            raise ValueError("Point-in-time membership contains duplicate keys:\n" + duplicate_rows.head(20).to_string(index=False))
+        daily = daily.merge(membership[["security_id","session_date","is_member"]], on=membership_key, how="left", validate="many_to_one")
     else: daily["is_member"] = daily.symbol.eq(config.benchmark_symbol)
     daily["pit_member"] = daily.is_member.fillna(False) | daily.symbol.eq(config.benchmark_symbol)
     daily["sector_id"] = np.nan; daily["industry_id"] = np.nan

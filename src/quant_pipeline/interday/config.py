@@ -114,9 +114,19 @@ class InterdayConfig:
     beta_sensitivity_window_sessions: int = 60
     beta_minimum_observations: int = 60
 
-    # Keep false until a real CUDA parity-tested reducer exists.
-    use_cuda: bool = False
+    use_cuda: bool = True
     cuda_device: str = "cuda:0"
+    require_cuda_for_full_scan: bool = True
+    allow_cpu_reference_smoke: bool = True
+
+    gpu_parity_feature_pairs: int = 8
+    gpu_parity_target_pairs: int = 8
+    gpu_parity_atol: float = 1e-9
+    gpu_parity_rtol: float = 1e-7
+
+    gpu_minimum_free_memory_bytes: int = 2_000_000_000
+    gpu_target_block_size: int | None = None
+    gpu_feature_block_size: int | None = None
 
     memory_budget_fraction: float = 0.70
     feature_block_size: int | None = None
@@ -236,3 +246,21 @@ class InterdayConfig:
             raise ValueError("Statistical accumulation must be float64")
         if self.pvalue_sidedness != "two_sided":
             raise ValueError("Interday 2A discovery uses two-sided p-values")
+
+        if self.require_cuda_for_full_scan and not self.use_cuda:
+            raise ValueError(
+                "Full Interday 2A scans require use_cuda=true. "
+                "Use a dedicated smoke configuration to run the CPU reference."
+            )
+        if self.gpu_parity_feature_pairs <= 0:
+            raise ValueError("gpu_parity_feature_pairs must be positive")
+        if self.gpu_parity_target_pairs <= 0:
+            raise ValueError("gpu_parity_target_pairs must be positive")
+        if self.gpu_parity_atol < 0 or self.gpu_parity_rtol < 0:
+            raise ValueError("GPU parity tolerances must be nonnegative")
+        if self.gpu_minimum_free_memory_bytes < 0:
+            raise ValueError("gpu_minimum_free_memory_bytes must be nonnegative")
+        for name in ("gpu_target_block_size", "gpu_feature_block_size"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive when configured")
